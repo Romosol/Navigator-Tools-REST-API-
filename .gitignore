@@ -8,3 +8,4 @@ coverage/
 !.env.example
 __pycache__/
 *.pyc
+*.spec

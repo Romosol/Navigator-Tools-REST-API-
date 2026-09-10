@@ -86,6 +86,15 @@ export default function App() {
     document.body.removeChild(a);
   };
 
+  const handleDownloadBat = () => {
+    const a = document.createElement('a');
+    a.href = '/build_exe.bat';
+    a.download = 'build_exe.bat';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-blue-600 selection:text-white">
       {/* Top Header */}
@@ -445,6 +454,32 @@ pip install requests openpyxl{"\n"}python navigator_app.py
                     </ul>
                   </li>
                 </ul>
+              </div>
+
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3 text-xs text-slate-300">
+                <div className="flex items-center justify-between">
+                  <div className="font-semibold text-slate-200 flex items-center gap-2">
+                    <Zap className="w-4 h-4 text-amber-400" />
+                    Шаг 4. Сборка в автономный EXE (запуск без Python):
+                  </div>
+                  <button
+                    onClick={handleDownloadBat}
+                    className="px-2.5 py-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded flex items-center gap-1 text-[11px] font-medium"
+                  >
+                    <Download className="w-3 h-3" /> Скачать build_exe.bat
+                  </button>
+                </div>
+                <p className="text-slate-400 leading-relaxed">
+                  Чтобы конечный пользователь мог запускать программу обычным двойным кликом (без установки Python и библиотек), скрипт компилируется через <b>PyInstaller</b> в один <code className="text-slate-200">NavigatorApp.exe</code>.
+                </p>
+                <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 space-y-1.5 font-mono text-[11px] text-emerald-400">
+                  <div className="text-slate-500"># Быстрая сборка в одну команду:</div>
+                  <div>pip install pyinstaller requests openpyxl</div>
+                  <div>pyinstaller --noconsole --onefile --name "NavigatorApp" navigator_app.py</div>
+                </div>
+                <p className="text-slate-500 text-[11px]">
+                  Готовый файл будет в папке <code className="text-slate-300">dist/NavigatorApp.exe</code>. В репозиторий также добавлен рабочий процесс <b>GitHub Actions</b> (<code>.github/workflows/build-exe.yml</code>), который автоматически создаёт сборку при публикации релиза.
+                </p>
               </div>
             </div>
           </div>

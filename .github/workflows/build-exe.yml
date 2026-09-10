@@ -23,11 +23,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests openpyxl pyinstaller
+          pip install -r requirements.txt
 
       - name: Build EXE with PyInstaller
         run: |
@@ -48,12 +49,28 @@ jobs:
           name: NavigatorApp-Windows
           path: NavigatorApp-Windows.zip
 
-      - name: Attach Assets to Release
+      - name: Attach Assets to Release (on release or tag)
         if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             NavigatorApp-Windows.zip
             dist/NavigatorApp.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach Assets to Latest Release (on manual run)
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          try {
+            $latestTag = (gh release view --json tagName -q .tagName)
+            if ($latestTag) {
+              Write-Host "Uploading assets to latest release: $latestTag"
+              gh release upload $latestTag NavigatorApp-Windows.zip dist\NavigatorApp.exe --clobber
+            }
+          } catch {
+            Write-Host "No existing release found or upload skipped."
+          }
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
