@@ -1,0 +1,6 @@
+{
+  "name": "Панель автоматизации Навигатора",
+  "description": "Инструменты автоматизации, оптимизации и прямого REST API взаимодействия с порталом Навигатор дополнительного образования",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
