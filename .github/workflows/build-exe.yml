@@ -34,27 +34,17 @@ jobs:
         run: |
           pyinstaller --noconsole --onefile --name "NavigatorApp" navigator_app.py
 
-      - name: Prepare release bundle
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path release
-          Copy-Item dist\NavigatorApp.exe -Destination release\
-          if (Test-Path list.xlsx) { Copy-Item list.xlsx -Destination release\ }
-          if (Test-Path config.json) { Copy-Item config.json -Destination release\ }
-          Compress-Archive -Path release\* -DestinationPath NavigatorApp-Windows.zip -Force
-
       - name: Upload Artifact to Run
         uses: actions/upload-artifact@v4
         with:
-          name: NavigatorApp-Windows
-          path: NavigatorApp-Windows.zip
+          name: NavigatorApp
+          path: dist/NavigatorApp.exe
 
       - name: Attach Assets to Release (on release or tag)
         if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            NavigatorApp-Windows.zip
             dist/NavigatorApp.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -67,7 +57,7 @@ jobs:
             $latestTag = (gh release view --json tagName -q .tagName)
             if ($latestTag) {
               Write-Host "Uploading assets to latest release: $latestTag"
-              gh release upload $latestTag NavigatorApp-Windows.zip dist\NavigatorApp.exe --clobber
+              gh release upload $latestTag dist\NavigatorApp.exe --clobber
             }
           } catch {
             Write-Host "No existing release found or upload skipped."
