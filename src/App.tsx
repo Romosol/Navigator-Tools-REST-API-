@@ -20,7 +20,8 @@ import {
   Search,
   AlertCircle,
   BookOpen,
-  RefreshCw
+  RefreshCw,
+  Bug
 } from 'lucide-react';
 
 export default function App() {
@@ -29,6 +30,12 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'overview' | 'code' | 'guide'>('overview');
   const [guiTab, setGuiTab] = useState<'events' | 'confirm' | 'program' | 'study'>('study');
   const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const [showBugModal, setShowBugModal] = useState(false);
+  const [bugTitle, setBugTitle] = useState('Ошибка при проверке заявки');
+  const [bugSection, setBugSection] = useState('Вкладка 4: Сверка со study_list, подтверждение и обучение');
+  const [bugDesc, setBugDesc] = useState('1. Что делали: Нажали кнопку «Загрузить список заявок программы»\n2. Что ожидали: Заявки сопоставятся с файлом Excel\n3. Что произошло: Ошибка таймаута при медленном интернете');
+  const [bugDiag, setBugDiag] = useState(true);
+  const [bugCopied, setBugCopied] = useState(false);
   const [mockPing, setMockPing] = useState({
     ms: 145,
     label: 'Низкая (Сервер свободен)',
@@ -354,6 +361,14 @@ export default function App() {
                     >
                       <RefreshCw className="w-3.5 h-3.5 text-blue-400" />
                       🔄 Обновления (v2.1.0)
+                    </button>
+                    <button
+                      onClick={() => setShowBugModal(true)}
+                      className="px-2.5 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-300 border border-red-500/40 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                      title="Сообщить об ошибке в GitHub Issues"
+                    >
+                      <Bug className="w-3.5 h-3.5 text-red-400" />
+                      🐞 Баг-репорт
                     </button>
                   </div>
                 </div>
@@ -968,6 +983,128 @@ pip install requests openpyxl{"\n"}python navigator_app.py
                 >
                   <Download className="w-3.5 h-3.5" />
                   Скачать на GitHub
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Создать баг-репорт (GitHub Issues) */}
+      {showBugModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-xl w-full p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-red-500/10 border border-red-500/30 flex items-center justify-center text-red-400">
+                  <Bug className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-100">
+                    Создать баг-репорт (GitHub Issues)
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Отправка тикета в репозиторий <span className="text-red-400 font-mono">Romosol/Navigator-Tools-REST-API-</span>
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowBugModal(false)}
+                className="text-slate-400 hover:text-slate-200 text-lg leading-none cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block text-slate-300 font-medium mb-1">
+                  Тема ошибки (Заголовок):
+                </label>
+                <input
+                  type="text"
+                  value={bugTitle}
+                  onChange={(e) => setBugTitle(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-xs focus:border-red-500 focus:outline-none"
+                  placeholder="Краткая суть проблемы..."
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-medium mb-1">
+                  Раздел программы:
+                </label>
+                <select
+                  value={bugSection}
+                  onChange={(e) => setBugSection(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-xs focus:border-red-500 focus:outline-none"
+                >
+                  <option>Вкладка 1: Пакетная запись на мероприятие (event_list.xlsx)</option>
+                  <option>Вкладка 2: Подтверждение и участие в мероприятии</option>
+                  <option>Вкладка 3: Зачисление на учебную программу (programm_list.xlsx)</option>
+                  <option>Вкладка 4: Сверка со study_list, подтверждение и обучение</option>
+                  <option>Экран авторизации / Вход в систему</option>
+                  <option>Проверка обновлений или настройки</option>
+                  <option>Другое / Общая ошибка приложения</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-medium mb-1">
+                  Что произошло и шаги для воспроизведения:
+                </label>
+                <textarea
+                  rows={4}
+                  value={bugDesc}
+                  onChange={(e) => setBugDesc(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-slate-200 text-xs font-mono focus:border-red-500 focus:outline-none resize-none"
+                />
+              </div>
+
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
+                <label className="flex items-center gap-2 text-slate-300 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={bugDiag}
+                    onChange={(e) => setBugDiag(e.target.checked)}
+                    className="rounded border-slate-700 text-red-600 focus:ring-red-500"
+                  />
+                  <span className="font-semibold text-slate-200">Прикрепить диагностику и системный журнал</span>
+                </label>
+                {bugDiag && (
+                  <div className="text-[11px] text-slate-400 pl-5 font-mono space-y-0.5">
+                    <div>• Версия: v2.1.0 (Windows / PyInstaller)</div>
+                    <div>• Журнал: logs/results_log.txt (последние 15 строк с маскированием паролей)</div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-slate-800">
+              <span className="text-[11px] text-slate-400">
+                {bugCopied ? <span className="text-emerald-400 font-semibold">✓ Текст скопирован в буфер!</span> : 'Откроется форма GitHub с заполненными полями'}
+              </span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    const text = `# [BUG] ${bugTitle}\n\n### Описание проблемы\n${bugDesc}\n\n### Раздел программы\n- ${bugSection}\n\n### Диагностика\n- Версия: v2.1.0\n- ОС: Windows\n`;
+                    navigator.clipboard.writeText(text);
+                    setBugCopied(true);
+                    setTimeout(() => setBugCopied(false), 2000);
+                  }}
+                  className="px-3 py-1.5 rounded-lg border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-medium transition-colors cursor-pointer"
+                >
+                  📋 Скопировать текст
+                </button>
+                <a
+                  href={`https://github.com/Romosol/Navigator-Tools-REST-API-/issues/new?title=${encodeURIComponent(`[BUG] ${bugTitle}`)}&body=${encodeURIComponent(`### Описание проблемы\n${bugDesc}\n\n### Раздел программы\n- ${bugSection}\n\n### Окружение\n- Версия NavigatorApp: v2.1.0\n- Способ запуска: NavigatorApp.exe\n`)}&labels=bug`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all shadow-md shadow-red-600/20"
+                >
+                  <Bug className="w-3.5 h-3.5" />
+                  Отправить в GitHub Issues
                 </a>
               </div>
             </div>

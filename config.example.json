@@ -20,5 +20,6 @@
   "study_date_start": "01.09.2026",
   "study_financing_source": "1",
   "study_verify_excel": true,
-  "check_updates": true
+  "check_updates": true,
+  "github_token": ""
 }

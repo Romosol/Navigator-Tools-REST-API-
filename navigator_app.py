@@ -18,6 +18,8 @@ import shutil
 import subprocess
 import threading
 import webbrowser
+import platform
+import urllib.parse
 from typing import Optional, Tuple, Dict, Any, List, Callable, Union
 import requests
 
@@ -25,6 +27,9 @@ APP_VERSION = "2.1.0"
 GITHUB_REPO = "Romosol/Navigator-Tools-REST-API-"
 GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
+GITHUB_ISSUES_URL = f"https://github.com/{GITHUB_REPO}/issues"
+GITHUB_NEW_ISSUE_URL = f"https://github.com/{GITHUB_REPO}/issues/new"
+GITHUB_ISSUES_API = f"https://api.github.com/repos/{GITHUB_REPO}/issues"
 
 CONFIG_FILE = "config.json"
 EVENT_EXCEL_FILE = "event_list.xlsx"
@@ -362,6 +367,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "study_financing_source": "1",
     "study_verify_excel": True,
     "check_updates": True,
+    "github_token": "",
     "history": {
         "email": [],
         "activity_name": [],
@@ -2177,6 +2183,312 @@ class NavigatorApp:
         btn_later.pack(side=tk.RIGHT)
 
     # ---------------------------------------------------------------------
+    # ДИАЛОГ СОЗДАНИЯ БАГ-РЕПОРТА (GITHUB ISSUES)
+    # ---------------------------------------------------------------------
+    def open_bug_report_dialog(self, initial_tab: str = ""):
+        """
+        Открывает интерактивное окно создания отчета об ошибке (баг-репорта).
+        Позволяет пользователю ввести описание проблемы и отправить её
+        в систему GitHub Issues (напрямую по токену либо через предзаполненную веб-форму).
+        """
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Создать баг-репорт (GitHub Issues)")
+        dlg.geometry("640x660")
+        dlg.minsize(560, 520)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        # Центрирование диалога относительно главного окна
+        try:
+            dlg.update_idletasks()
+            rx = self.root.winfo_rootx()
+            ry = self.root.winfo_rooty()
+            rw = self.root.winfo_width()
+            rh = self.root.winfo_height()
+            x = rx + max(0, (rw - 640) // 2)
+            y = ry + max(0, (rh - 660) // 2)
+            dlg.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+        pad = ttk.Frame(dlg, padding=16)
+        pad.pack(fill=tk.BOTH, expand=True)
+
+        # Верхняя информационная шапка
+        top_frame = ttk.Frame(pad)
+        top_frame.pack(fill=tk.X, pady=(0, 12))
+
+        lbl_icon = ttk.Label(top_frame, text="🐞", font=("Segoe UI", 26))
+        lbl_icon.pack(side=tk.LEFT, padx=(0, 12))
+
+        header_box = ttk.Frame(top_frame)
+        header_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            header_box,
+            text="Сообщить об ошибке (Баг-репорт)",
+            font=("Segoe UI", 12, "bold"),
+            foreground="#b91c1c"
+        ).pack(anchor=tk.W)
+
+        ttk.Label(
+            header_box,
+            text="Ваш отчёт будет направлен в GitHub Issues для скорейшего исправления.",
+            font=("Segoe UI", 8),
+            foreground="#64748b"
+        ).pack(anchor=tk.W, pady=(2, 0))
+
+        # Поле: Тема ошибки
+        box_title = ttk.Frame(pad)
+        box_title.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(box_title, text="Краткая тема ошибки (Заголовок):", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
+        entry_title = ttk.Entry(box_title, font=("Segoe UI", 9))
+        entry_title.pack(fill=tk.X)
+        entry_title.insert(0, "Ошибка при выполнении операции")
+
+        # Поле: В какой вкладке произошла
+        box_tab = ttk.Frame(pad)
+        box_tab.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(box_tab, text="Раздел программы, в котором возникла ошибка:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
+
+        tab_choices = [
+            "Вкладка 1: Пакетная запись на мероприятие (event_list.xlsx)",
+            "Вкладка 2: Подтверждение и участие в мероприятии",
+            "Вкладка 3: Зачисление на учебную программу (programm_list.xlsx)",
+            "Вкладка 4: Сверка со study_list, подтверждение и обучение",
+            "Экран авторизации / Вход в систему",
+            "Проверка обновлений или настройки",
+            "Другое / Общая ошибка приложения"
+        ]
+        cmb_section = ttk.Combobox(box_tab, values=tab_choices, state="readonly", font=("Segoe UI", 9))
+        cmb_section.pack(fill=tk.X)
+        if initial_tab and any(initial_tab in c for c in tab_choices):
+            for c in tab_choices:
+                if initial_tab in c:
+                    cmb_section.set(c)
+                    break
+        else:
+            cmb_section.set(tab_choices[0])
+
+        # Поле: Описание и шаги воспроизведения
+        box_desc = ttk.Frame(pad)
+        box_desc.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        ttk.Label(box_desc, text="Подробное описание проблемы и шаги для воспроизведения:", font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, pady=(0, 2))
+
+        txt_desc = tk.Text(box_desc, wrap=tk.WORD, height=7, font=("Segoe UI", 9))
+        txt_desc.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb_desc = ttk.Scrollbar(box_desc, orient=tk.VERTICAL, command=txt_desc.yview)
+        sb_desc.pack(side=tk.RIGHT, fill=tk.Y)
+        txt_desc.config(yscrollcommand=sb_desc.set)
+
+        placeholder_text = (
+            "1. Что делали (какие кнопки нажимали, какие данные вводили):\n"
+            "   \n"
+            "2. Что ожидали получить:\n"
+            "   \n"
+            "3. Что произошло на самом деле (сообщение или поведение):\n"
+            "   \n"
+        )
+        txt_desc.insert(tk.END, placeholder_text)
+
+        # Чекбокс: Прикрепить диагностические данные
+        var_attach_diag = tk.BooleanVar(value=True)
+        chk_diag = ttk.Checkbutton(
+            pad,
+            text=f"Прикрепить технические данные (ОС, версия v{APP_VERSION}, последние строки лога сессии)",
+            variable=var_attach_diag
+        )
+        chk_diag.pack(anchor=tk.W, pady=(0, 8))
+
+        # Опциональный GitHub Personal Access Token
+        box_token = ttk.LabelFrame(pad, text="Прямая отправка через GitHub Token (необязательно)", padding=8)
+        box_token.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(
+            box_token,
+            text="Укажите токен только если хотите отправить репорт напрямую без открытия браузера. Иначе оставьте пустым.",
+            font=("Segoe UI", 8),
+            foreground="#64748b"
+        ).pack(anchor=tk.W, pady=(0, 4))
+
+        token_row = ttk.Frame(box_token)
+        token_row.pack(fill=tk.X)
+
+        var_token = tk.StringVar(value=str(self.saved_cfg.get("github_token", "")))
+        entry_token = ttk.Entry(token_row, textvariable=var_token, show="*", font=("Segoe UI", 9))
+        entry_token.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+
+        var_save_token = tk.BooleanVar(value=bool(self.saved_cfg.get("github_token")))
+        ttk.Checkbutton(token_row, text="Сохранить в config.json", variable=var_save_token).pack(side=tk.RIGHT)
+
+        # Сборка текста репорта в формате Markdown
+        def _build_markdown_report() -> Tuple[str, str]:
+            t_input = entry_title.get().strip()
+            title_clean = t_input if t_input else "Сообщение об ошибке"
+            section_val = cmb_section.get()
+            desc_val = txt_desc.get("1.0", tk.END).strip()
+
+            body_lines = [
+                f"### Описание проблемы\n{desc_val}\n",
+                f"### Раздел программы\n- {section_val}\n"
+            ]
+
+            if var_attach_diag.get():
+                os_name = f"{platform.system()} {platform.release()} ({platform.version()})"
+                py_ver = sys.version.split()[0]
+                exec_mode = "EXE (автономная сборка PyInstaller)" if getattr(sys, "frozen", False) else "Python скрипт (исходный код)"
+                
+                body_lines.append(
+                    f"### Окружение (Диагностика)\n"
+                    f"- **Версия NavigatorApp:** v{APP_VERSION}\n"
+                    f"- **Операционная система:** {os_name}\n"
+                    f"- **Режим запуска:** {exec_mode}\n"
+                    f"- **Версия Python:** {py_ver}\n"
+                )
+
+                # Безопасное извлечение последних 15 строк журнала сессии
+                tail_logs = []
+                log_candidate = CURRENT_LOG_FILE if CURRENT_LOG_FILE and os.path.exists(CURRENT_LOG_FILE) else LOG_FILE
+                if log_candidate and os.path.exists(log_candidate):
+                    try:
+                        import re
+                        with open(log_candidate, "r", encoding="utf-8", errors="ignore") as lf:
+                            raw_lines = lf.readlines()
+                            for line in raw_lines[-15:]:
+                                l_clean = re.sub(r'("password"|"token"|"pwd"):\s*"[^"]+"', r'\1: "***"', line)
+                                tail_logs.append(l_clean)
+                    except Exception as ex:
+                        tail_logs.append(f"Не удалось прочитать лог: {ex}\n")
+
+                if tail_logs:
+                    body_lines.append(f"### Журнал событий (последние строки)\n```text\n{''.join(tail_logs).strip()}\n```\n")
+
+            full_body = "\n".join(body_lines)
+            return title_clean, full_body
+
+        # Нижняя панель действий
+        btn_bar = ttk.Frame(pad)
+        btn_bar.pack(fill=tk.X)
+
+        status_lbl = ttk.Label(btn_bar, text="", font=("Segoe UI", 9))
+        status_lbl.pack(side=tk.LEFT)
+
+        def _copy_markdown():
+            title_val, body_val = _build_markdown_report()
+            full_text = f"# [BUG] {title_val}\n\n{body_val}"
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(full_text)
+                status_lbl.config(text="✓ Скопировано в буфер обмена!", foreground="#16a34a")
+            except Exception as ex:
+                messagebox.showerror("Ошибка", f"Не удалось скопировать: {ex}")
+
+        def _submit_report():
+            title_val, body_val = _build_markdown_report()
+            token = var_token.get().strip()
+
+            # Сохранение токена при запросе пользователя
+            if var_save_token.get():
+                self.saved_cfg["github_token"] = token
+                update_config(github_token=token)
+            elif "github_token" in self.saved_cfg and not token:
+                self.saved_cfg["github_token"] = ""
+                update_config(github_token="")
+
+            # Если указан токен, отправляем напрямую через GitHub REST API
+            if token:
+                status_lbl.config(text="Отправка в GitHub Issues...", foreground="#2563eb")
+                dlg.update_idletasks()
+
+                def send_worker():
+                    try:
+                        headers = {
+                            "Authorization": f"Bearer {token}",
+                            "Accept": "application/vnd.github.v3+json",
+                            "User-Agent": f"NavigatorApp/{APP_VERSION}"
+                        }
+                        payload = {
+                            "title": f"[BUG] {title_val}",
+                            "body": body_val,
+                            "labels": ["bug"]
+                        }
+                        resp = requests.post(GITHUB_ISSUES_API, headers=headers, json=payload, timeout=10)
+                        if resp.status_code == 201:
+                            issue_data = resp.json()
+                            issue_url = issue_data.get("html_url", GITHUB_ISSUES_URL)
+                            issue_num = issue_data.get("number", "")
+
+                            def on_success():
+                                status_lbl.config(text=f"✓ Успешно опубликован issue #{issue_num}!", foreground="#16a34a")
+                                if messagebox.askyesno(
+                                    "Баг-репорт создан",
+                                    f"Баг-репорт успешно отправлен в GitHub Issues (Issue #{issue_num})!\n\nОткрыть созданный тикет в браузере?"
+                                ):
+                                    webbrowser.open(issue_url)
+                                dlg.destroy()
+
+                            self.root.after(0, on_success)
+                        else:
+                            def on_fail():
+                                status_lbl.config(text="Ошибка отправки по API", foreground="#dc2626")
+                                err_msg = f"GitHub API вернул код {resp.status_code}."
+                                if messagebox.askyesno(
+                                    "Ошибка отправки",
+                                    f"{err_msg}\n\nОткрыть веб-форму GitHub в браузере с заполненными данными?"
+                                ):
+                                    _open_in_browser(title_val, body_val)
+                                    dlg.destroy()
+
+                            self.root.after(0, on_fail)
+                    except Exception as ex:
+                        def on_exc():
+                            status_lbl.config(text="Ошибка соединения", foreground="#dc2626")
+                            if messagebox.askyesno(
+                                "Ошибка сети",
+                                f"Не удалось связаться с GitHub:\n{ex}\n\nОткрыть страницу создания Issue в браузере?"
+                            ):
+                                _open_in_browser(title_val, body_val)
+                                dlg.destroy()
+
+                        self.root.after(0, on_exc)
+
+                threading.Thread(target=send_worker, daemon=True).start()
+            else:
+                # Если токен не указан — открываем GitHub New Issue с предзаполненными полями
+                _open_in_browser(title_val, body_val)
+                dlg.destroy()
+
+        def _open_in_browser(title_val: str, body_val: str):
+            try:
+                encoded_title = urllib.parse.quote_plus(f"[BUG] {title_val}")
+                encoded_body = urllib.parse.quote_plus(body_val)
+                issue_create_url = f"{GITHUB_NEW_ISSUE_URL}?title={encoded_title}&body={encoded_body}&labels=bug"
+                webbrowser.open(issue_create_url)
+            except Exception as ex:
+                messagebox.showerror("Ошибка", f"Не удалось открыть браузер:\n{ex}")
+
+        btn_copy = ttk.Button(
+            btn_bar,
+            text="📋 Скопировать текст",
+            command=_copy_markdown
+        )
+        btn_copy.pack(side=tk.RIGHT, padx=(4, 0))
+
+        btn_send = ttk.Button(
+            btn_bar,
+            text="🚀 Отправить на GitHub",
+            command=_submit_report
+        )
+        btn_send.pack(side=tk.RIGHT, padx=(4, 0))
+
+        btn_cancel = ttk.Button(
+            btn_bar,
+            text="Закрыть",
+            command=dlg.destroy
+        )
+        btn_cancel.pack(side=tk.RIGHT)
+
+    # ---------------------------------------------------------------------
     # ЭКРАН 1: АВТОРИЗАЦИЯ (с выбором: прошлый или новый пользователь)
     # ---------------------------------------------------------------------
     def show_login_screen(self):
@@ -2246,7 +2558,14 @@ class NavigatorApp:
             text="🔄 Проверить обновления",
             command=lambda: self.check_updates_async(silent_if_latest=False)
         )
-        btn_chk.pack(side=tk.RIGHT)
+        btn_chk.pack(side=tk.RIGHT, padx=(4, 0))
+
+        btn_bug = ttk.Button(
+            footer_box,
+            text="🐞 Создать баг-репорт",
+            command=self.open_bug_report_dialog
+        )
+        btn_bug.pack(side=tk.RIGHT)
 
     def on_new_login_click(self):
         email = self.entry_email.get().strip()
@@ -2307,6 +2626,7 @@ class NavigatorApp:
         ttk.Button(btn_box, text="📁 Папка логов", command=lambda: open_file_in_os(os.path.abspath(LOGS_DIR))).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_box, text="⚙ config.json", command=lambda: open_file_in_os(CONFIG_FILE)).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_box, text="🔄 Обновления", command=lambda: self.check_updates_async(silent_if_latest=False)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_box, text="🐞 Баг-репорт", command=self.open_bug_report_dialog).pack(side=tk.LEFT, padx=2)
         
         def _on_logout():
             write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🚪 ВЫХОД ИЗ УЧЕТНОЙ ЗАПИСИ: {user_name}")
