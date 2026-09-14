@@ -281,7 +281,11 @@ pyinstaller --noconsole --onefile --name "NavigatorApp" navigator_app.py
 
 ## ❓ Возможные проблемы и способы их решения
 
-### 1. `ModuleNotFoundError: No module named 'requests'` (или `openpyxl`)
+### 1. `NameError: name 'Callable' is not defined`
+- **Причина**: В старой версии билда отсутствовал импорт `Callable` из стандартного модуля `typing`.
+- **Решение**: Проблема устранена. Загрузите обновленный `navigator_app.py` или пересоберите `.exe` файл запуском `build_exe.bat`.
+
+### 2. `ModuleNotFoundError: No module named 'requests'` (или `openpyxl`)
 - **Причина**: Не установлены сторонние библиотеки Python.
 - **Решение**: Выполните в терминале команду:
   ```bash

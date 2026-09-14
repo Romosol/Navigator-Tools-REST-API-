@@ -17,7 +17,7 @@ import time
 import shutil
 import subprocess
 import threading
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any, List, Callable, Union
 import requests
 
 CONFIG_FILE = "config.json"
