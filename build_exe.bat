@@ -23,6 +23,11 @@ if %errorlevel% neq 0 (
 )
 echo [OK] Синтаксис проверен успешно.
 
+if not "%~1"=="" (
+    echo [ИНФО] Указана версия для сборки: %~1
+    python -c "import re; v = re.sub(r'^[vV]', '', '%~1'); c = open('navigator_app.py', encoding='utf-8').read(); open('navigator_app.py', 'w', encoding='utf-8').write(re.sub(r'APP_VERSION\s*=\s*[\"\\\'][^\"\\\']+[\"\\\']', f'APP_VERSION = \"{v}\"', c)); print(f'Установлена версия APP_VERSION = {v}')"
+)
+
 echo.
 echo 3. Компиляция navigator_app.py в автономный EXE (PyInstaller)...
 if exist "app.ico" (

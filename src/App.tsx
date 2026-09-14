@@ -19,7 +19,8 @@ import {
   GraduationCap,
   Search,
   AlertCircle,
-  BookOpen
+  BookOpen,
+  RefreshCw
 } from 'lucide-react';
 
 export default function App() {
@@ -27,6 +28,7 @@ export default function App() {
   const [copiedCmd, setCopiedCmd] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'code' | 'guide'>('overview');
   const [guiTab, setGuiTab] = useState<'events' | 'confirm' | 'program' | 'study'>('study');
+  const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [mockPing, setMockPing] = useState({
     ms: 145,
     label: 'Низкая (Сервер свободен)',
@@ -345,6 +347,14 @@ export default function App() {
                       <Settings className="w-3.5 h-3.5 text-slate-400" />
                       ⚙ config.json
                     </div>
+                    <button
+                      onClick={() => setShowUpdateModal(true)}
+                      className="px-2.5 py-1 bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 border border-blue-500/40 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                      title="Проверить обновления приложения"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5 text-blue-400" />
+                      🔄 Обновления (v2.1.0)
+                    </button>
                   </div>
                 </div>
 
@@ -897,6 +907,73 @@ pip install requests openpyxl{"\n"}python navigator_app.py
           </div>
         )}
       </main>
+
+      {/* Modal: Проверка обновлений NavigatorApp */}
+      {showUpdateModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-3">
+                <div className="text-3xl">🚀</div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-100">
+                    Доступно обновление NavigatorApp
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Установлена: <span className="text-slate-300 font-mono">v2.1.0</span> | Репозиторий: <span className="text-blue-400 font-mono">Romosol/Navigator-Tools-REST-API-</span>
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowUpdateModal(false)}
+                className="text-slate-400 hover:text-slate-200 text-lg leading-none cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 space-y-2 text-xs">
+              <div className="flex items-center justify-between text-slate-300 font-semibold">
+                <span>Описание релиза (GitHub Releases)</span>
+                <span className="text-emerald-400 text-[11px]">Latest Release</span>
+              </div>
+              <p className="text-slate-400 leading-relaxed">
+                Свежий билд <code className="text-slate-200 font-mono">NavigatorApp.exe</code> доступен для прямой загрузки на GitHub.
+                Сборка скомпилирована через GitHub Actions и содержит все свежие доработки.
+              </p>
+              <div className="pt-2 border-t border-slate-800 text-[11px] text-slate-400">
+                ✅ Автономный запуск без Python<br />
+                ✅ Встроенная проверка целостности и синтаксиса
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2">
+              <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+                <input type="checkbox" defaultChecked className="rounded border-slate-700 text-blue-600 focus:ring-blue-500" />
+                <span>Проверять при каждом запуске</span>
+              </label>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowUpdateModal(false)}
+                  className="px-3 py-1.5 rounded-lg border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-medium transition-colors cursor-pointer"
+                >
+                  Напомнить позже
+                </button>
+                <a
+                  href="https://github.com/Romosol/Navigator-Tools-REST-API-/releases/latest"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all shadow-md shadow-blue-600/20"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Скачать на GitHub
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

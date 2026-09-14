@@ -34,6 +34,29 @@ jobs:
         run: |
           python -m py_compile navigator_app.py
 
+      - name: Inject version from Git Tag into script
+        shell: python
+        run: |
+          import os, re
+          # Get tag name from GITHUB_REF_NAME or GITHUB_REF
+          ref_name = os.environ.get('GITHUB_REF_NAME', '').strip()
+          ref = os.environ.get('GITHUB_REF', '').strip()
+          tag = ref_name or ref.replace('refs/tags/', '')
+          
+          # Match e.g. 'v2.1.2' -> '2.1.2' or '2.1.2' -> '2.1.2'
+          match = re.search(r'v?(\d+\.\d+(?:\.\d+)?)', tag)
+          if match:
+              clean_version = match.group(1)
+              print(f"Detected Git Tag: '{tag}' -> Injecting APP_VERSION = '{clean_version}' into navigator_app.py")
+              with open('navigator_app.py', 'r', encoding='utf-8') as f:
+                  code = f.read()
+              new_code = re.sub(r'APP_VERSION\s*=\s*["\'][^"\']+["\']', f'APP_VERSION = "{clean_version}"', code)
+              with open('navigator_app.py', 'w', encoding='utf-8') as f:
+                  f.write(new_code)
+              print("Successfully injected version.")
+          else:
+              print(f"No semantic version tag found in '{tag}'. Keeping default APP_VERSION in navigator_app.py.")
+
       - name: Build EXE with PyInstaller
         shell: pwsh
         run: |

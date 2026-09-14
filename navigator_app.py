@@ -17,8 +17,14 @@ import time
 import shutil
 import subprocess
 import threading
+import webbrowser
 from typing import Optional, Tuple, Dict, Any, List, Callable, Union
 import requests
+
+APP_VERSION = "2.1.0"
+GITHUB_REPO = "Romosol/Navigator-Tools-REST-API-"
+GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
 CONFIG_FILE = "config.json"
 EVENT_EXCEL_FILE = "event_list.xlsx"
@@ -30,6 +36,32 @@ LOGS_DIR = "logs"
 SESSION_START_TIME_STR = time.strftime("%Y-%m-%d_%H-%M-%S")
 CURRENT_LOG_FILE = os.path.join(LOGS_DIR, f"results_log_{SESSION_START_TIME_STR}.txt")
 LOG_FILE = CURRENT_LOG_FILE  # Указывает на текущий файл запуска внутри папки logs/
+
+
+def parse_version_tuple(ver_str: str) -> Tuple[int, ...]:
+    """Преобразует строку версии (например 'v2.2.0', '2.1') в кортеж чисел (2, 2, 0)."""
+    if not ver_str:
+        return (0,)
+    s = str(ver_str).strip().lstrip("vV")
+    for sep in ["-", "+", " ", "_"]:
+        if sep in s:
+            s = s.split(sep, 1)[0]
+    parts = []
+    for p in s.split("."):
+        digits = "".join(ch for ch in p if ch.isdigit())
+        if digits:
+            parts.append(int(digits))
+    return tuple(parts) if parts else (0,)
+
+
+def is_newer_version(remote_ver: str, local_ver: str) -> bool:
+    """Сравнивает версии и возвращает True, если remote_ver строго новее local_ver."""
+    rem = parse_version_tuple(remote_ver)
+    loc = parse_version_tuple(local_ver)
+    max_len = max(len(rem), len(loc))
+    rem_padded = rem + (0,) * (max_len - len(rem))
+    loc_padded = loc + (0,) * (max_len - len(loc))
+    return rem_padded > loc_padded
 
 
 def normalize_academic_year_id(val: Any) -> str:
@@ -329,6 +361,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "study_date_start": "01.09.2026",
     "study_financing_source": "1",
     "study_verify_excel": True,
+    "check_updates": True,
     "history": {
         "email": [],
         "activity_name": [],
@@ -1807,7 +1840,7 @@ def setup_universal_clipboard(root: tk.Tk):
 class NavigatorApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Навигатор: Автоматизация (Мероприятия, Подтверждение & Зачисление)")
+        self.root.title(f"Навигатор: Автоматизация v{APP_VERSION} (Мероприятия, Подтверждение & Зачисление)")
         self.root.geometry("880x730")
         self.root.minsize(820, 640)
 
@@ -1846,6 +1879,10 @@ class NavigatorApp:
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
         self.show_login_screen()
+
+        # Фоновая проверка обновлений на GitHub через 1.5 сек после старта программы
+        if self.saved_cfg.get("check_updates", True):
+            self.root.after(1500, lambda: self.check_updates_async(silent_if_latest=True))
 
     def _on_server_ping_update(self, latency_ms: float, load_label: str, color: str, delay: float):
         """Обновляет статус отклика сервера и скорости в GUI в реальном времени."""
@@ -1984,6 +2021,162 @@ class NavigatorApp:
         combobox.bind("<<ComboboxSelected>>", _commit, add="+")
 
     # ---------------------------------------------------------------------
+    # ПРОВЕРКА И УВЕДОМЛЕНИЯ О НОВЫХ РЕЛИЗАХ (GITHUB RELEASES)
+    # ---------------------------------------------------------------------
+    def check_updates_async(self, silent_if_latest: bool = True):
+        """
+        Проверяет наличие нового релиза на GitHub в фоновом потоке,
+        чтобы не блокировать графический интерфейс при медленном интернете.
+        """
+        def worker():
+            try:
+                headers = {
+                    "Accept": "application/vnd.github.v3+json",
+                    "User-Agent": f"NavigatorApp/{APP_VERSION}"
+                }
+                resp = requests.get(GITHUB_RELEASES_API, headers=headers, timeout=5)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    tag_name = data.get("tag_name", "").strip()
+                    release_url = data.get("html_url", GITHUB_RELEASES_PAGE)
+                    release_title = data.get("name") or tag_name
+                    release_notes = (data.get("body") or "").strip()
+
+                    if is_newer_version(tag_name, APP_VERSION):
+                        self.root.after(0, lambda: self._show_update_available_dialog(
+                            latest_ver=tag_name,
+                            url=release_url,
+                            title=release_title,
+                            notes=release_notes
+                        ))
+                    elif not silent_if_latest:
+                        self.root.after(0, lambda: messagebox.showinfo(
+                            "Проверка обновлений",
+                            f"У вас установлена последняя версия!\n\n"
+                            f"Текущая версия: v{APP_VERSION}\n"
+                            f"Релиз на GitHub: {tag_name or ('v' + APP_VERSION)}"
+                        ))
+                elif not silent_if_latest:
+                    self.root.after(0, lambda: messagebox.showwarning(
+                        "Проверка обновлений",
+                        f"Не удалось получить информацию о релизах с GitHub (Код ответа: {resp.status_code})."
+                    ))
+            except Exception as e:
+                if not silent_if_latest:
+                    self.root.after(0, lambda: messagebox.showwarning(
+                        "Проверка обновлений",
+                        f"Ошибка подключения к GitHub при проверке обновлений:\n{e}\n\nПроверьте подключение к интернету."
+                    ))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_update_available_dialog(self, latest_ver: str, url: str, title: str, notes: str):
+        """Отображает модальное окно с предложением скачать новый релиз NavigatorApp.exe."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Доступно обновление программы")
+        dlg.geometry("540x410")
+        dlg.minsize(480, 340)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        # Центрирование окна относительно главного окна приложения
+        try:
+            dlg.update_idletasks()
+            rx = self.root.winfo_rootx()
+            ry = self.root.winfo_rooty()
+            rw = self.root.winfo_width()
+            rh = self.root.winfo_height()
+            x = rx + max(0, (rw - 540) // 2)
+            y = ry + max(0, (rh - 410) // 2)
+            dlg.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+        pad = ttk.Frame(dlg, padding=18)
+        pad.pack(fill=tk.BOTH, expand=True)
+
+        # Верхняя информационная шапка
+        top_frame = ttk.Frame(pad)
+        top_frame.pack(fill=tk.X, pady=(0, 10))
+
+        lbl_icon = ttk.Label(top_frame, text="🚀", font=("Segoe UI", 26))
+        lbl_icon.pack(side=tk.LEFT, padx=(0, 12))
+
+        header_box = ttk.Frame(top_frame)
+        header_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            header_box,
+            text=f"Доступна новая версия: {latest_ver}",
+            font=("Segoe UI", 12, "bold"),
+            foreground="#1e40af"
+        ).pack(anchor=tk.W)
+
+        ttk.Label(
+            header_box,
+            text=f"Установленная версия: v{APP_VERSION}",
+            font=("Segoe UI", 9),
+            foreground="#64748b"
+        ).pack(anchor=tk.W, pady=(2, 0))
+
+        # Описание релиза
+        box_notes = ttk.LabelFrame(pad, text=f"Описание релиза ({title})", padding=8)
+        box_notes.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        txt = tk.Text(box_notes, wrap=tk.WORD, height=7, font=("Segoe UI", 9), relief=tk.FLAT)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb = ttk.Scrollbar(box_notes, orient=tk.VERTICAL, command=txt.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        txt.config(yscrollcommand=sb.set)
+
+        summary_body = notes if notes else "Новый исполняемый файл NavigatorApp.exe готов к загрузке на странице релизов GitHub."
+        txt.insert(tk.END, summary_body)
+        txt.config(state=tk.DISABLED)
+
+        # Опция автопроверки
+        var_auto = tk.BooleanVar(value=bool(self.saved_cfg.get("check_updates", True)))
+        def _toggle_auto():
+            v = var_auto.get()
+            self.saved_cfg["check_updates"] = v
+            update_config(check_updates=v)
+
+        chk = ttk.Checkbutton(
+            pad,
+            text="Автоматически проверять новые релизы при запуске",
+            variable=var_auto,
+            command=_toggle_auto
+        )
+        chk.pack(anchor=tk.W, pady=(0, 12))
+
+        # Кнопки действий
+        btns = ttk.Frame(pad)
+        btns.pack(fill=tk.X)
+
+        def _download_now():
+            try:
+                webbrowser.open(url)
+            except Exception as ex:
+                messagebox.showerror("Ошибка", f"Не удалось открыть браузер:\n{url}\n\n{ex}")
+            dlg.destroy()
+
+        def _close():
+            dlg.destroy()
+
+        btn_go = ttk.Button(
+            btns,
+            text="📥 Скачать обновление (Открыть GitHub)",
+            command=_download_now
+        )
+        btn_go.pack(side=tk.RIGHT, padx=(6, 0))
+
+        btn_later = ttk.Button(
+            btns,
+            text="Напомнить позже",
+            command=_close
+        )
+        btn_later.pack(side=tk.RIGHT)
+
+    # ---------------------------------------------------------------------
     # ЭКРАН 1: АВТОРИЗАЦИЯ (с выбором: прошлый или новый пользователь)
     # ---------------------------------------------------------------------
     def show_login_screen(self):
@@ -2040,6 +2233,20 @@ class NavigatorApp:
 
         self.login_status_lbl = ttk.Label(container, text="", font=("Segoe UI", 9))
         self.login_status_lbl.pack(pady=(10, 0))
+
+        # Нижняя плашка: версия программы и ручная проверка обновлений
+        footer_box = ttk.Frame(container)
+        footer_box.pack(fill=tk.X, pady=(15, 0))
+
+        lbl_v = ttk.Label(footer_box, text=f"Версия: v{APP_VERSION}", font=("Segoe UI", 8), foreground="gray")
+        lbl_v.pack(side=tk.LEFT)
+
+        btn_chk = ttk.Button(
+            footer_box,
+            text="🔄 Проверить обновления",
+            command=lambda: self.check_updates_async(silent_if_latest=False)
+        )
+        btn_chk.pack(side=tk.RIGHT)
 
     def on_new_login_click(self):
         email = self.entry_email.get().strip()
@@ -2099,6 +2306,7 @@ class NavigatorApp:
         ttk.Button(btn_box, text=log_btn_title, command=lambda: open_file_in_os(CURRENT_LOG_FILE or LOG_FILE)).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_box, text="📁 Папка логов", command=lambda: open_file_in_os(os.path.abspath(LOGS_DIR))).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_box, text="⚙ config.json", command=lambda: open_file_in_os(CONFIG_FILE)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_box, text="🔄 Обновления", command=lambda: self.check_updates_async(silent_if_latest=False)).pack(side=tk.LEFT, padx=2)
         
         def _on_logout():
             write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🚪 ВЫХОД ИЗ УЧЕТНОЙ ЗАПИСИ: {user_name}")
