@@ -1,0 +1,23 @@
+{
+  "email": "",
+  "password": "",
+  "saved_at": "",
+  "activity_name": "Мастер-класс по робототехнике",
+  "activity_datetime": "01.09.2026 11:00",
+  "confirm_activity_name": "Мастер-класс по робототехнике",
+  "program_name": "Основы программирования и робототехники",
+  "program_event_id": "12345",
+  "program_group_name": "Группа 1",
+  "program_group_id": "67890",
+  "program_academic_year_id": "2026/2027",
+  "program_use_certificate": false,
+  "program_create_certificate": true,
+  "study_program_name": "Основы программирования и робототехники",
+  "study_program_group_name": "Группа 1",
+  "study_academic_year_id": "2026/2027",
+  "study_decree_number": "1",
+  "study_date_signing": "31.08.2026",
+  "study_date_start": "01.09.2026",
+  "study_financing_source": "1",
+  "study_verify_excel": true
+}

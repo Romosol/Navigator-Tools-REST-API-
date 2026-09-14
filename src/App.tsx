@@ -78,12 +78,12 @@ export default function App() {
   };
 
   const handleDownloadApp = () => handleDownloadFile('navigator_app.py');
-  const handleDownloadOldApp = () => handleDownloadFile('navigator_app_old.py');
-  const handleDownloadLegacyClient = () => handleDownloadFile('navigator_client_legacy.py');
+  const handleDownloadConfigExample = () => handleDownloadFile('config.example.json');
+  const handleDownloadLicense = () => handleDownloadFile('LICENSE');
   const handleDownloadEventExcel = () => handleDownloadFile('event_list.xlsx');
   const handleDownloadProgramExcel = () => handleDownloadFile('programm_list.xlsx');
   const handleDownloadStudyExcel = () => handleDownloadFile('study_list.xlsx');
-  const handleDownloadConfig = () => handleDownloadFile('config.json');
+  const handleDownloadConfig = () => handleDownloadFile('config.example.json');
   const handleDownloadLog = () => handleDownloadFile('logs/results_log.txt');
 
   const handleDownloadBat = () => {
@@ -156,14 +156,16 @@ export default function App() {
             <Settings className="w-3.5 h-3.5 text-slate-400" />
             config.json
           </button>
-          <button
-            onClick={handleDownloadOldApp}
-            className="px-3 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 text-xs font-medium flex items-center gap-1.5 transition-colors"
-            title="Скачать предыдущую (старую) версию navigator_app_old.py"
+          <a
+            href="https://github.com/Romosol/Navigator-Tools-REST-API-/releases/latest"
+            target="_blank"
+            rel="noreferrer"
+            className="px-3 py-1.5 rounded-lg border border-blue-500/40 bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+            title="Перейти к скачиванию готового NavigatorApp.exe"
           >
-            <Download className="w-3.5 h-3.5 text-amber-400" />
-            navigator_app_old.py (старая версия)
-          </button>
+            <Download className="w-3.5 h-3.5 text-blue-400" />
+            Релиз NavigatorApp.exe
+          </a>
           <button
             onClick={handleDownloadApp}
             className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all shadow-md shadow-blue-600/20"
@@ -445,7 +447,7 @@ export default function App() {
                       </div>
                       <div className="flex items-center gap-2 text-[11px] text-emerald-400 bg-emerald-950/40 border border-emerald-500/20 px-2 py-1 rounded">
                         <CheckCircle2 className="w-3.5 h-3.5" />
-                        <span>✓ Программа найдена: <b>ID 41675</b> (Республиканский технопарк)</span>
+                        <span>✓ Программа найдена: <b>ID 12345</b> (Дворец творчества)</span>
                       </div>
                     </div>
 
@@ -454,7 +456,7 @@ export default function App() {
                       <label className="block text-slate-400 text-xs">Группа (название или ID):</label>
                       <div className="flex gap-2">
                         <div className="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-1.5 text-slate-300 text-xs font-medium placeholder-slate-500">
-                          Краснокамский р-н
+                          Группа 1
                         </div>
                         <div className="px-3 py-1.5 bg-slate-800 border border-slate-700 rounded text-slate-300 text-xs font-semibold flex items-center gap-1 cursor-default">
                           <Search className="w-3 h-3" />
@@ -546,7 +548,7 @@ export default function App() {
                         <label className="block text-slate-400 mb-1">Название мероприятия:</label>
                         <div className="flex gap-2">
                           <div className="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 font-mono text-[11px]">
-                            Мастер-класс по анимации в ДОЛ Горный воздух
+                            Мастер-класс по робототехнике
                           </div>
                           <div className="px-3 py-1.5 bg-blue-600/30 border border-blue-500/50 rounded text-blue-300 text-xs font-semibold flex items-center gap-1 cursor-default whitespace-nowrap">
                             <Search className="w-3 h-3" />
@@ -583,7 +585,7 @@ export default function App() {
                         <label className="block text-slate-400 mb-1">Название мероприятия:</label>
                         <div className="flex gap-2">
                           <div className="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-2 text-slate-200 font-mono text-[11px]">
-                            Мастер-класс по анимации в ДОЛ Горный воздух
+                            Мастер-класс по робототехнике
                           </div>
                           <div className="px-3 py-1.5 bg-emerald-600/30 border border-emerald-500/50 rounded text-emerald-300 text-xs font-semibold flex items-center gap-1 cursor-default whitespace-nowrap">
                             <Search className="w-3 h-3" />
@@ -632,7 +634,7 @@ export default function App() {
                       </div>
                       <div className="flex items-center gap-2 text-[11px] text-emerald-400 bg-emerald-950/40 border border-emerald-500/20 px-2 py-1 rounded">
                         <CheckCircle2 className="w-3.5 h-3.5" />
-                        <span>✓ Найдено: <b>ID 41675</b> (Мест в группах: 210 | Организация: Республиканский технопарк)</span>
+                        <span>✓ Найдено: <b>ID 12345</b> (Мест в группах: 120 | Организация: Дворец творчества)</span>
                       </div>
                     </div>
 
@@ -641,7 +643,7 @@ export default function App() {
                       <label className="block text-slate-400 text-xs">Группа (название или ID, проверка принадлежности программе через GET /api/rest/eventGroups):</label>
                       <div className="flex gap-2">
                         <div className="flex-1 bg-slate-900 border border-purple-500/40 rounded px-3 py-1.5 text-slate-200 text-xs font-medium truncate">
-                          Краснокамский р-н
+                          Группа 1
                         </div>
                         <div className="px-3 py-1.5 bg-purple-600/30 border border-purple-500/50 rounded text-purple-300 text-xs font-semibold flex items-center gap-1 cursor-default">
                           <Search className="w-3 h-3" />
@@ -650,7 +652,7 @@ export default function App() {
                       </div>
                       <div className="flex items-center gap-2 text-[11px] text-emerald-400 bg-emerald-950/40 border border-emerald-500/20 px-2 py-1 rounded">
                         <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" />
-                        <span>✓ Группа подтверждена для программы <b>ID 41675</b>: «Краснокамский р-н» (ID: <b>118318</b> | педагог: Габдрахманов Л.И. | мест: 70)</span>
+                        <span>✓ Группа подтверждена для программы <b>ID 12345</b>: «Группа 1» (ID: <b>67890</b> | педагог: Иванов И.И. | мест: 30)</span>
                       </div>
                     </div>
 
@@ -658,7 +660,7 @@ export default function App() {
                       <div>
                         <label className="block text-slate-400 mb-1">ID группы (group_id):</label>
                         <div className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-1.5 text-slate-200 font-mono text-[11px]">
-                          118318
+                          67890
                         </div>
                         <span className="text-[10px] text-slate-500">Автоматически сопоставлен с программой</span>
                       </div>
@@ -709,9 +711,9 @@ export default function App() {
                   {guiTab === 'study' ? (
                     <>
                       <div className="text-cyan-400">[ТАБЛИЦА] Таблица study_list.xlsx: 15 детей (подтверждено: 1, зачислено: 13). 2 столбца: ФИО и флаг.</div>
-                      <div className="text-cyan-400">[ЗАПРОС ЗАЯВОК] Программа: '"Мобильный Технопарк VR/AR/IT"', группа: 'Краснокамский р-н', год: 2026...</div>
-                      <div className="text-emerald-400 font-medium">✓ Заявки программы '"Мобильный Технопарк VR/AR/IT"' (ID: 41675) успешно загружены:</div>
-                      <div className="text-slate-300">   • Всего найдено заявок на сервере: 15 | Группа: «Краснокамский р-н» (ID: 118318)</div>
+                      <div className="text-cyan-400">[ЗАПРОС ЗАЯВОК] Программа: 'Основы программирования и робототехники', группа: 'Группа 1', год: 2026...</div>
+                      <div className="text-emerald-400 font-medium">✓ Заявки программы 'Основы программирования и робототехники' (ID: 12345) успешно загружены:</div>
+                      <div className="text-slate-300">   • Всего найдено заявок на сервере: 15 | Группа: «Группа 1» (ID: 67890)</div>
                       <div className="text-cyan-300">   • 📑 Сверка со study_list.xlsx (15 детей в файле):</div>
                       <div className="text-emerald-400">      ✓ Сравнение по Фамилии и Имени (отчество в Excel игнорируется): 15 из 15 совпало</div>
                       <div className="text-yellow-400">   • ⏳ Неподтвержденные (initial) — готовы к подтверждению: 1</div>
@@ -721,20 +723,20 @@ export default function App() {
                       <div className="text-slate-400">  [02] Заявка #3484210 | Васильева Екатерина Сергеевна  | ДР: 02.03.2012 | ✓ Excel (стр.3: 'Васильева Екатерина') | Статус: 'approve'</div>
                       <div className="text-cyan-400">[СТАРТ] Шаг 1: Подтверждение заявок initial ➜ approve...</div>
                       <div className="text-emerald-400 font-medium">  ✓ Заявка #3484354 (Смирнов Алексей): подтверждена (approve) ➜ флаг в Excel обновлен</div>
-                      <div className="text-cyan-400">[СТАРТ] Шаг 2: Зачисление на обучение approve ➜ study (приказ №183 от 2026-08-31)...</div>
-                      <div className="text-emerald-400 font-medium">  ✓ Заявка #3484354: зачислена на обучение (study, приказ №183) ➜ флаг в Excel: 'Зачислен'</div>
-                      <div className="text-emerald-400 font-medium">  ✓ Заявка #3484210: зачислена на обучение (study, приказ №183) ➜ флаг в Excel: 'Зачислен'</div>
-                      <div className="text-sky-300">ИТОГИ: Успешно зачислено 2 детей на обучение (study, приказ №183 от 2026-08-31)!</div>
+                      <div className="text-cyan-400">[СТАРТ] Шаг 2: Зачисление на обучение approve ➜ study (приказ №1 от 2026-08-31)...</div>
+                      <div className="text-emerald-400 font-medium">  ✓ Заявка #3484354: зачислена на обучение (study, приказ №1) ➜ флаг в Excel: 'Зачислен'</div>
+                      <div className="text-emerald-400 font-medium">  ✓ Заявка #3484210: зачислена на обучение (study, приказ №1) ➜ флаг в Excel: 'Зачислен'</div>
+                      <div className="text-sky-300">ИТОГИ: Успешно зачислено 2 детей на обучение (study, приказ №1 от 2026-08-31)!</div>
                     </>
                   ) : guiTab === 'program' ? (
                     <>
-                      <div className="text-cyan-400">[ПОИСК] Поиск программы: '"Мобильный Технопарк VR/AR/IT" (ПДО Габдрахманов Л.И.)'...</div>
-                      <div className="text-emerald-400 font-medium">✓ Программа найдена: '"Мобильный Технопарк VR/AR/IT" (ПДО Габдрахманов Л.И.)' (ID: 41675)</div>
-                      <div className="text-cyan-400">[ПРОВЕРКА] Проверка принадлежности группы 'Краснокамский р-н' к программе ID 41675...</div>
-                      <div className="text-emerald-400 font-medium">✓ Группа подтверждена для программы: 'Краснокамский р-н' (ID: 118318, педагог: Габдрахманов Л.И., мест: 70)</div>
-                      <div className="text-cyan-400">[СТАРТ] Зачисление на программу (event_id: 41675, group_id: 118318, год: 2026, файл: programm_list.xlsx)...</div>
+                      <div className="text-cyan-400">[ПОИСК] Поиск программы: 'Основы программирования и робототехники'...</div>
+                      <div className="text-emerald-400 font-medium">✓ Программа найдена: 'Основы программирования и робототехники' (ID: 12345)</div>
+                      <div className="text-cyan-400">[ПРОВЕРКА] Проверка принадлежности группы 'Группа 1' к программе ID 12345...</div>
+                      <div className="text-emerald-400 font-medium">✓ Группа подтверждена для программы: 'Группа 1' (ID: 67890, педагог: Иванов И.И., мест: 30)</div>
+                      <div className="text-cyan-400">[СТАРТ] Зачисление на программу (event_id: 12345, group_id: 67890, год: 2026, файл: programm_list.xlsx)...</div>
                       <div className="text-slate-400">Загружено записей из таблицы (programm_list.xlsx): 15</div>
-                      <div className="text-slate-300">[1] Солодовникова Романа Александровна (ДР: 23.06.2005)</div>
+                      <div className="text-slate-300">[1] Иванов Иван Иванович (ДР: 15.05.2012)</div>
                       <div className="text-cyan-300">   [ПРОВЕРКА ДУБЛИКАТА] Поиск существующих заявок (state_grid in initial, approve, study)...</div>
                       <div className="text-emerald-400 font-medium">   ✓ УСПЕШНО: Заявка на зачисление создана (#3485996) (Kid ID: f6c7c6d2..., Parent: 791100)</div>
                       <div className="text-cyan-300">   💾 Статус в programm_list.xlsx сохранен: 'Зачислен (Заявка #3485996)' (строка 2)</div>
@@ -782,23 +784,31 @@ export default function App() {
               <div className="bg-slate-950 border border-slate-800 rounded-xl p-4">
                 <div className="text-xs font-semibold text-slate-200 mb-2">Шаг 1. Скачайте файлы в одну папку:</div>
                 <div className="flex flex-wrap gap-2 text-xs">
-                  <button onClick={handleDownloadApp} className="px-3 py-1.5 bg-blue-600/20 text-blue-300 border border-blue-500/30 rounded flex items-center gap-1.5 hover:bg-blue-600/30 transition-colors font-medium" title="Актуальная версия с большой красной кнопкой прерывания">
-                    <Download className="w-3.5 h-3.5" /> 1. navigator_app.py (актуальная v2.1)
-                  </button>
-                  <button onClick={handleDownloadOldApp} className="px-3 py-1.5 bg-amber-500/10 text-amber-300 border border-amber-500/30 rounded flex items-center gap-1.5 hover:bg-amber-500/20 transition-colors font-medium" title="Предыдущая (старая) версия приложения">
-                    <Download className="w-3.5 h-3.5 text-amber-400" /> navigator_app_old.py (старая версия)
-                  </button>
-                  <button onClick={handleDownloadLegacyClient} className="px-3 py-1.5 bg-slate-800/80 text-slate-300 border border-slate-700 rounded flex items-center gap-1.5 hover:bg-slate-800 transition-colors" title="Старый консольный скрипт">
-                    <Download className="w-3.5 h-3.5 text-slate-400" /> navigator_client_legacy.py (архив)
+                  <a
+                    href="https://github.com/Romosol/Navigator-Tools-REST-API-/releases/latest"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-3 py-1.5 bg-blue-600 text-white rounded flex items-center gap-1.5 hover:bg-blue-500 transition-colors font-semibold shadow-sm"
+                  >
+                    <Download className="w-3.5 h-3.5" /> 🚀 Скачать NavigatorApp.exe (Релиз)
+                  </a>
+                  <button onClick={handleDownloadApp} className="px-3 py-1.5 bg-blue-600/20 text-blue-300 border border-blue-500/30 rounded flex items-center gap-1.5 hover:bg-blue-600/30 transition-colors font-medium">
+                    <Download className="w-3.5 h-3.5" /> navigator_app.py (Исходный код)
                   </button>
                   <button onClick={handleDownloadEventExcel} className="px-3 py-1.5 bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 rounded flex items-center gap-1.5" title="Таблица для мероприятий">
-                    <Download className="w-3.5 h-3.5" /> 2. event_list.xlsx
+                    <Download className="w-3.5 h-3.5" /> event_list.xlsx
                   </button>
                   <button onClick={handleDownloadProgramExcel} className="px-3 py-1.5 bg-purple-600/20 text-purple-300 border border-purple-500/30 rounded flex items-center gap-1.5" title="Таблица для программ">
-                    <Download className="w-3.5 h-3.5" /> 3. programm_list.xlsx
+                    <Download className="w-3.5 h-3.5" /> programm_list.xlsx
                   </button>
-                  <button onClick={handleDownloadConfig} className="px-3 py-1.5 bg-slate-800 text-slate-300 border border-slate-700 rounded flex items-center gap-1.5">
-                    <Download className="w-3.5 h-3.5" /> 4. config.json
+                  <button onClick={handleDownloadStudyExcel} className="px-3 py-1.5 bg-sky-600/20 text-sky-300 border border-sky-500/30 rounded flex items-center gap-1.5" title="Таблица для сверки обучения">
+                    <Download className="w-3.5 h-3.5" /> study_list.xlsx
+                  </button>
+                  <button onClick={handleDownloadConfigExample} className="px-3 py-1.5 bg-slate-800 text-slate-300 border border-slate-700 rounded flex items-center gap-1.5">
+                    <Download className="w-3.5 h-3.5" /> config.example.json
+                  </button>
+                  <button onClick={handleDownloadLicense} className="px-3 py-1.5 bg-slate-800 text-slate-300 border border-slate-700 rounded flex items-center gap-1.5">
+                    <Download className="w-3.5 h-3.5" /> LICENSE (MIT)
                   </button>
                 </div>
               </div>
@@ -837,8 +847,8 @@ pip install requests openpyxl{"\n"}python navigator_app.py
                     <b className="text-purple-300">Вкладка 3 (Зачисление на учебную программу):</b>
                     <ul className="list-circle list-inside pl-4 pt-1 space-y-1 text-slate-400">
                       <li>Использует отдельную таблицу <code className="text-purple-400">programm_list.xlsx</code> (ФИО, Дата рождения, Статус).</li>
-                      <li>Введите <b className="text-slate-300">Название программы</b> (например, <code>"Мобильный Технопарк VR/AR/IT" (ПДО Габдрахманов Л.И.)</code>). Программа автоматически найдет её через <code className="text-purple-300">GET /api/rest/events</code>.</li>
-                      <li>Укажите <b className="text-slate-300">Группу</b> по названию (например, <code>Краснокамский р-н</code>) или точный ID (<code>118318</code>). Программа проверяет принадлежность группы программе через <code className="text-purple-300">GET /api/rest/eventGroups?extFilters=[{'{'}"property":"event_id","value":...{'}'}]</code>.</li>
+                      <li>Введите <b className="text-slate-300">Название программы</b> (например, <code>Основы программирования и робототехники</code>). Программа автоматически найдет её через <code className="text-purple-300">GET /api/rest/events</code>.</li>
+                      <li>Укажите <b className="text-slate-300">Группу</b> по названию (например, <code>Группа 1</code>) или точный ID (<code>67890</code>). Программа проверяет принадлежность группы программе через <code className="text-purple-300">GET /api/rest/eventGroups?extFilters=[{'{'}"property":"event_id","value":...{'}'}]</code>.</li>
                       <li>Укажите <b className="text-slate-300">Учебный год</b>: поддерживаются оба формата — как на сайте <code>2026/2027</code>, так и чистый ID <code>2026</code>.</li>
                       <li><b>Защита от повторной подачи (дубликатов)</b>: перед отправкой заявки программа проверяет через <code className="text-purple-300">GET /api/rest/order</code> наличие активных заявок со статусами <code className="text-emerald-400">initial</code>, <code className="text-emerald-400">approve</code>, <code className="text-emerald-400">study</code> для данного ребенка и программы. Если заявка уже есть, создание пропускается, а в таблице фиксируется актуальный статус!</li>
                       <li>Опционально отметьте чекбоксы: <code className="text-purple-300">create_certificate: true</code> (создавать сертификат) и <code className="text-purple-300">use_certificate</code>.</li>

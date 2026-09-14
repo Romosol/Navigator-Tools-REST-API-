@@ -30,9 +30,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Build EXE with PyInstaller
+      - name: Syntax check Python script
         run: |
-          pyinstaller --noconsole --onefile --name "NavigatorApp" navigator_app.py
+          python -m py_compile navigator_app.py
+
+      - name: Build EXE with PyInstaller
+        shell: pwsh
+        run: |
+          if (Test-Path "app.ico") {
+            pyinstaller --noconsole --onefile --icon "app.ico" --add-data "app.ico;." --name "NavigatorApp" navigator_app.py
+          } else {
+            pyinstaller --noconsole --onefile --name "NavigatorApp" navigator_app.py
+          }
 
       - name: Upload Artifact to Run
         uses: actions/upload-artifact@v4

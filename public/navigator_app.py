@@ -923,8 +923,8 @@ class NavigatorClient:
             "use_certificate": false,
             "create_certificate": true,
             "site_user_id": "791100",
-            "event_id": "41675",
-            "group_id": "118318",
+            "event_id": "12345",
+            "group_id": "67890",
             "academic_year_id": "2026",
             "kid_id": "f6c7c6d2-6b40-4767-a77c-5d0889139026"
           }
@@ -2186,7 +2186,7 @@ class NavigatorApp:
         # Подсказка-пример валидного ввода для мероприятия
         ttk.Label(
             tab_add,
-            text="💡 Нажмите на поле для выбора из истории. Пример: Мастер-класс по анимации в ДОЛ Горный воздух",
+            text="💡 Нажмите на поле для выбора из истории. Пример: Мастер-класс по робототехнике",
             foreground="#64748b",
             font=("Segoe UI", 8)
         ).grid(row=1, column=1, columnspan=2, sticky=tk.W, pady=(0, 6))
@@ -2260,7 +2260,7 @@ class NavigatorApp:
 
         ttk.Label(
             tab_conf,
-            text="💡 Нажмите на поле для выбора из истории. Пример: Мастер-класс по анимации в ДОЛ Горный воздух",
+            text="💡 Нажмите на поле для выбора из истории. Пример: Мастер-класс по робототехнике",
             foreground="#64748b",
             font=("Segoe UI", 8)
         ).grid(row=1, column=1, sticky=tk.W, pady=(0, 6))
@@ -2305,8 +2305,8 @@ class NavigatorApp:
         tab_program = ttk.Frame(tabs, padding=12)
         tabs.add(tab_program, text=" 🎓 3. Зачисление на программу ")
 
-        initial_prog_name = str(self.saved_cfg.get("program_name") or DEFAULT_CONFIG.get("program_name", '"Мобильный Технопарк VR/AR/IT" (ПДО Габдрахманов Л.И.)'))
-        initial_prog_group = str(self.saved_cfg.get("program_group_name") or self.saved_cfg.get("program_group_id") or DEFAULT_CONFIG.get("program_group_name", "Краснокамский р-н"))
+        initial_prog_name = str(self.saved_cfg.get("program_name") or DEFAULT_CONFIG.get("program_name", "Основы программирования и робототехники"))
+        initial_prog_group = str(self.saved_cfg.get("program_group_name") or self.saved_cfg.get("program_group_id") or DEFAULT_CONFIG.get("program_group_name", "Группа 1"))
         initial_prog_year = str(self.saved_cfg.get("program_academic_year_id") or DEFAULT_CONFIG["program_academic_year_id"])
         initial_prog_use_cert = bool(self.saved_cfg.get("program_use_certificate", DEFAULT_CONFIG["program_use_certificate"]))
         initial_prog_create_cert = bool(self.saved_cfg.get("program_create_certificate", DEFAULT_CONFIG["program_create_certificate"]))
@@ -2402,7 +2402,7 @@ class NavigatorApp:
                 update_config(
                     program_name=p_name,
                     program_group_name=g_val,
-                    program_group_id=g_val if g_val.isdigit() else self.saved_cfg.get("program_group_id", "118318"),
+                    program_group_id=g_val if g_val.isdigit() else str(self.saved_cfg.get("program_group_id") or ""),
                     program_academic_year_id=y_id,
                     program_create_certificate=c_cert,
                     program_use_certificate=u_cert
@@ -3526,7 +3526,7 @@ class NavigatorApp:
         update_config(
             program_name=prog_name,
             program_group_name=group_input,
-            program_group_id=group_input if group_input.isdigit() else self.saved_cfg.get("program_group_id", "118318"),
+            program_group_id=group_input if group_input.isdigit() else str(self.saved_cfg.get("program_group_id") or ""),
             program_academic_year_id=raw_year,
             program_create_certificate=create_cert,
             program_use_certificate=use_cert
@@ -4607,6 +4607,20 @@ if __name__ == "__main__":
                 root.tk.call("tk", "scaling", dpi / 72.0)
         except Exception:
             pass
+
+    # Установка иконки приложения (app.ico), если файл доступен
+    ico_candidates = [
+        getattr(sys, "_MEIPASS", None) and os.path.join(getattr(sys, "_MEIPASS", ""), "app.ico"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.ico"),
+        "app.ico",
+    ]
+    for ico_path in ico_candidates:
+        if ico_path and os.path.exists(ico_path):
+            try:
+                root.iconbitmap(ico_path)
+                break
+            except Exception:
+                pass
 
     app = NavigatorApp(root)
 

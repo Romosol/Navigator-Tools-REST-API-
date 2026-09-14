@@ -1,11 +1,40 @@
+# Dependencies
 node_modules/
+
+# Build outputs
 build/
 dist/
-coverage/
-.DS_Store
+dist-ssr/
+
+# Sensitive local configurations (passwords, tokens, operator settings)
+config.json
+public/config.json
+*.session
+
+# Local operation logs (may contain children personal data)
+logs/
+public/logs/
 *.log
+results_log.txt
+public/results_log.txt
+
+# Microsoft Excel temporary lock files
+~$*.xlsx
+~$*.xls
+*.tmp
+
+# Environment variables & secrets
 .env*
 !.env.example
+
+# Python cache and compiled artifacts
 __pycache__/
-*.pyc
+public/__pycache__/
+*.py[cod]
+*$py.class
 *.spec
+
+# OS metadata
+.DS_Store
+Thumbs.db
+coverage/
