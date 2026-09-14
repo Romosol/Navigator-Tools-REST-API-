@@ -31,6 +31,7 @@ if exist "programm_list.xlsx" copy "programm_list.xlsx" "dist\programm_list.xlsx
 if exist "study_list.xlsx" copy "study_list.xlsx" "dist\study_list.xlsx" > nul
 if exist "list.xlsx" copy "list.xlsx" "dist\list.xlsx" > nul
 if exist "config.json" copy "config.json" "dist\config.json" > nul
+if exist "LICENSE" copy "LICENSE" "dist\LICENSE" > nul
 
 echo.
 echo ========================================================
@@ -41,6 +42,7 @@ echo   - dist\event_list.xlsx
 echo   - dist\programm_list.xlsx
 echo   - dist\study_list.xlsx
 echo   - dist\config.json
+echo   - dist\LICENSE
 echo   - dist\logs\
 echo ========================================================
 echo.
