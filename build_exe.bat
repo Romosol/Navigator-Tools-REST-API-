@@ -23,8 +23,12 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo 3. Копирование файлов шаблонов (list.xlsx и config.json) к EXE...
+echo 3. Копирование файлов шаблонов (Excel и config.json) к EXE...
 if not exist "dist" mkdir "dist"
+if not exist "dist\logs" mkdir "dist\logs"
+if exist "event_list.xlsx" copy "event_list.xlsx" "dist\event_list.xlsx" > nul
+if exist "programm_list.xlsx" copy "programm_list.xlsx" "dist\programm_list.xlsx" > nul
+if exist "study_list.xlsx" copy "study_list.xlsx" "dist\study_list.xlsx" > nul
 if exist "list.xlsx" copy "list.xlsx" "dist\list.xlsx" > nul
 if exist "config.json" copy "config.json" "dist\config.json" > nul
 
@@ -33,8 +37,11 @@ echo ========================================================
 echo Готово!
 echo Исполняемый файл и шаблоны находятся в папке: dist/
 echo   - dist\NavigatorApp.exe
-echo   - dist\list.xlsx
+echo   - dist\event_list.xlsx
+echo   - dist\programm_list.xlsx
+echo   - dist\study_list.xlsx
 echo   - dist\config.json
+echo   - dist\logs\
 echo ========================================================
 echo.
 pause

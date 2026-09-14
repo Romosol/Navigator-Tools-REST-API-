@@ -14,7 +14,6 @@ import os
 import sys
 import json
 import time
-import shutil
 import subprocess
 import threading
 from typing import Optional, Tuple, Dict, Any, List
@@ -23,13 +22,9 @@ import requests
 CONFIG_FILE = "config.json"
 EVENT_EXCEL_FILE = "event_list.xlsx"
 PROGRAM_EXCEL_FILE = "programm_list.xlsx"
-STUDY_EXCEL_FILE = "study_list.xlsx"
 LEGACY_EXCEL_FILE = "list.xlsx"
 EXCEL_FILE = EVENT_EXCEL_FILE  # Алиас для обратной совместимости
-LOGS_DIR = "logs"
-SESSION_START_TIME_STR = time.strftime("%Y-%m-%d_%H-%M-%S")
-CURRENT_LOG_FILE = os.path.join(LOGS_DIR, f"results_log_{SESSION_START_TIME_STR}.txt")
-LOG_FILE = CURRENT_LOG_FILE  # Указывает на текущий файл запуска внутри папки logs/
+LOG_FILE = "results_log.txt"
 
 
 def normalize_academic_year_id(val: Any) -> str:
@@ -91,272 +86,63 @@ def normalize_date_input(raw: Any, default_val: str = "") -> str:
     return s
 
 
-def normalize_fio_tokens(fio: Any) -> List[str]:
-    """Разбивает ФИО на чистые токены (буквенные слова в нижнем регистре с заменой 'ё' на 'е')."""
-    if not fio:
-        return []
-    import re
-    s = str(fio).strip().lower().replace("ё", "е")
-    clean = re.sub(r"[^a-zа-я0-9\s\-]", " ", s)
-    return [w.strip("-") for w in clean.split() if w.strip("-")]
-
-
-def check_fio_format(fio: Any) -> Tuple[bool, str]:
-    """
-    Проверяет формат записи ФИО ребенка из таблицы Excel:
-    Возвращает (is_valid: bool, error_reason: str).
-    - Если в Excel указаны Фамилия и инициалы (например: 'Иванов И.И.', 'Иванов И. И.', 'Иванов И.', 'Иванов И И', 'И.И. Иванов'),
-      отмечает это как неправильный формат (требуются Фамилия и полное Имя).
-    - Если указана только фамилия без имени ('Иванов'), возвращает ошибку отсутствия имени.
-    """
-    if not fio:
-        return False, "пустая строка ФИО"
-
-    raw = str(fio).strip()
-    if not raw:
-        return False, "пустая строка ФИО"
-
-    import re
-
-    # 1. Проверка на инициалы с точкой (например 'И.', 'И.И.', 'А. С.', 'И.В.')
-    if re.search(r"\b[a-zA-Zа-яА-ЯёЁ]\.", raw):
-        return False, "неправильный формат: указаны инициалы с точкой вместо полного имени (например: 'Иванов И.И.')"
-
-    # 2. Очищаем от знаков пунктуации и делим на слова
-    clean = re.sub(r"[^a-zA-Zа-яА-ЯёЁ0-9\-]", " ", raw)
-    words = [w.strip("-") for w in clean.split() if w.strip("-")]
-
-    if len(words) < 2:
-        return False, "неправильный формат: указана только фамилия без имени"
-
-    # 3. Проверка на однобуквенные токены (инициалы без точки, например 'Иванов И И' или 'Иванов И')
-    for w in words:
-        if len(w) == 1:
-            return False, f"неправильный формат: однобуквенный инициал '{w}' вместо полного имени"
-
-    return True, ""
-
-
-def extract_last_first(val: Any) -> Optional[Tuple[str, str]]:
-    """
-    Извлекает нормализованные (Фамилия, Имя) из строки ФИО или словаря заявки Навигатора.
-    Сайт Навигатора выдает Фамилию и Имя (поля kid_last_name, kid_first_name или строка site_user_fio).
-    В таблице Excel может быть Фамилия Имя Отчество, либо Фамилия Имя.
-    Отчество игнорируется, берутся только Фамилия и Имя ребенка.
-    Возвращает (last_name, first_name) в нижнем регистре с заменой 'ё' на 'е'.
-    Если передан некорректный формат (инициалы, < 2 слов), возвращает None.
-    """
-    if isinstance(val, dict):
-        last_raw = str(val.get("kid_last_name") or "").strip()
-        first_raw = str(val.get("kid_first_name") or "").strip()
-        if last_raw and first_raw:
-            l_toks = normalize_fio_tokens(last_raw)
-            f_toks = normalize_fio_tokens(first_raw)
-            if l_toks and f_toks:
-                if len(l_toks[0]) >= 2 and len(f_toks[0]) >= 2:
-                    return l_toks[0], f_toks[0]
-        # Резервный источник: server_fio или site_user_fio
-        fio_fallback = val.get("server_fio") or val.get("site_user_fio") or ""
-        return extract_last_first(fio_fallback)
-
-    if not val:
-        return None
-
-    s = str(val).strip()
-    is_valid, _ = check_fio_format(s)
-    if not is_valid:
-        return None
-
-    toks = normalize_fio_tokens(s)
-    if len(toks) >= 2:
-        # В русском ФИО первые два слова обычно Фамилия и Имя
-        # (или Имя и Фамилия, перестановка поддерживается в match_fio)
-        return toks[0], toks[1]
-
-    return None
-
-
-def match_fio(val_a: Any, val_b: Any) -> bool:
-    """
-    Сравнивает ребенка с сайта Навигатора со списком в Excel:
-    1. Сравниваются именно Фамилия и Имя:
-       - Сайт выдает Фамилию и Имя (в заявках: kid_last_name, kid_first_name или site_user_fio).
-       - В таблице Excel может быть: Фамилия Имя Отчество, либо Фамилия Имя.
-       - Отчество в Excel игнорируется при сверке.
-    2. Если в Excel указаны Фамилия и инициалы ('Иванов И.И.', 'Иванов И.') — они считаются
-       неправильным форматом и совпадение отклоняется до исправления на полное имя.
-    3. Поддерживает перестановку: Фамилия Имя == Имя Фамилия.
-    4. Защищен от разного регистра, пробелов и различий е/ё (Артём == Артем).
-    Возвращает True, если Фамилия и Имя совпадают.
-    """
-    lf_a = extract_last_first(val_a)
-    lf_b = extract_last_first(val_b)
-    if not lf_a or not lf_b:
-        return False
-
-    a_last, a_first = lf_a
-    b_last, b_first = lf_b
-
-    # 1. Прямое совпадение: Фамилия == Фамилия, Имя == Имя
-    if a_last == b_last and a_first == b_first:
-        return True
-
-    # 2. Совпадение с перестановкой: Фамилия Имя == Имя Фамилия
-    if a_last == b_first and a_first == b_last:
-        return True
-
-    # 3. Проверка вхождений токенов Фамилии и Имени (для нестандартного порядка слов)
-    str_a = val_a.get("server_fio") if isinstance(val_a, dict) else str(val_a)
-    str_b = val_b.get("server_fio") if isinstance(val_b, dict) else str(val_b)
-    toks_a = normalize_fio_tokens(str_a)
-    toks_b = normalize_fio_tokens(str_b)
-    if len(toks_a) >= 2 and len(toks_b) >= 2:
-        if set(toks_a[:2]) == set(toks_b[:2]):
-            return True
-
-    return False
-
-
 # =========================================================================
 # 1. СЕРВИСНЫЕ ФУНКЦИИ (КОНФИГ, ЛОГИ И EXCEL)
 # =========================================================================
-def init_session_log_file() -> str:
-    """
-    Инициализирует новый лог-файл при каждом запуске/перезапуске программы.
-    Имя файла включает текущую дату и время (например: results_log_2026-09-14_11-15-30.txt).
-    Все логи сохраняются ИСКЛЮЧИТЕЛЬНО в папке 'logs/'. В корневой директории файлы не создаются.
-    """
-    global CURRENT_LOG_FILE, LOG_FILE, SESSION_START_TIME_STR
-    SESSION_START_TIME_STR = time.strftime("%Y-%m-%d_%H-%M-%S")
-    filename = f"results_log_{SESSION_START_TIME_STR}.txt"
-
+def write_to_log_file(text: str) -> None:
+    """Безопасно дописывает запись в файл results_log.txt в кодировке UTF-8."""
     try:
-        os.makedirs(LOGS_DIR, exist_ok=True)
-    except Exception:
-        pass
-
-    # Если в корневой директории остались старые файлы логов от прошлых версий — переносим их в logs/
-    try:
-        for item in os.listdir("."):
-            if item.startswith("results_log") and item.endswith(".txt") and os.path.isfile(item):
-                dst = os.path.join(LOGS_DIR, item)
-                try:
-                    if not os.path.exists(dst):
-                        shutil.move(item, dst)
-                    else:
-                        os.remove(item)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    CURRENT_LOG_FILE = os.path.join(LOGS_DIR, filename)
-    LOG_FILE = CURRENT_LOG_FILE
-
-    header = (
-        "=" * 85 + "\n"
-        "НАВИГАТОР ДОПОЛНИТЕЛЬНОГО ОБРАЗОВАНИЯ — ЖУРНАЛ СЕССИИ\n"
-        f"Файл сессии:          {filename}\n"
-        f"Папка сохранения:     {os.path.abspath(LOGS_DIR)}\n"
-        f"Дата и время запуска: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"Рабочая директория:   {os.path.abspath('.')}\n"
-        "Логирование активности всех 4-х вкладок:\n"
-        "  • Вкладка 1: Пакетная запись на мероприятие (event_list.xlsx)\n"
-        "  • Вкладка 2: Подтверждение заявок и отметка участия в мероприятии\n"
-        "  • Вкладка 3: Зачисление на учебные программы (programm_list.xlsx)\n"
-        "  • Вкладка 4: Сверка со study_list.xlsx, подтверждение и зачисление на обучение\n"
-        + "=" * 85 + "\n\n"
-    )
-
-    # Сохраняем ТОЛЬКО в папке logs/
-    targets = [CURRENT_LOG_FILE, os.path.join(LOGS_DIR, "results_log.txt")]
-    for p in targets:
-        try:
-            with open(p, "w", encoding="utf-8") as f:
-                f.write(header)
-        except Exception as e:
-            print(f"Ошибка создания лога {p}: {e}")
-
-    return CURRENT_LOG_FILE
-
-
-def write_to_log_file(text: str, with_timestamp: bool = False) -> None:
-    """Безопасно дописывает запись в файлы журнала ИСКЛЮЧИТЕЛЬНО внутри папки logs/ в UTF-8."""
-    global CURRENT_LOG_FILE
-    if not CURRENT_LOG_FILE or not os.path.exists(CURRENT_LOG_FILE):
-        init_session_log_file()
-
-    line = str(text)
-    if with_timestamp and line.strip():
-        stripped = line.strip()
-        # Добавляем временную метку [ЧЧ:ММ:СС] только если строка еще не начинается с метки или разделителя
-        if not (stripped.startswith("[") or stripped.startswith("=") or stripped.startswith("-") or stripped.startswith("!")):
-            line = f"[{time.strftime('%H:%M:%S')}] {line}"
-
-    targets = [CURRENT_LOG_FILE, os.path.join(LOGS_DIR, "results_log.txt")]
-    for p in targets:
-        try:
-            with open(p, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-        except Exception:
-            pass
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(text + "\n")
+    except Exception as e:
+        print(f"Ошибка записи в {LOG_FILE}: {e}")
 
 
 def ensure_log_file() -> None:
-    """Создает новый уникальный файл журнала текущей сессии в папке logs/ при запуске."""
-    global CURRENT_LOG_FILE
-    if not CURRENT_LOG_FILE or not os.path.exists(CURRENT_LOG_FILE):
-        init_session_log_file()
+    """Создает файл results_log.txt с базовым заголовком, если он еще не существует."""
+    if not os.path.exists(LOG_FILE):
+        try:
+            with open(LOG_FILE, "w", encoding="utf-8") as f:
+                f.write("=" * 80 + "\n")
+                f.write("ЖУРНАЛ ОПЕРАЦИЙ НАВИГАТОРА (results_log.txt)\n")
+                f.write("Здесь сохраняются подробные результаты создания и подтверждения заявок по детям.\n")
+                f.write(f"Создан: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 80 + "\n\n")
+        except Exception as e:
+            print(f"Ошибка инициализации {LOG_FILE}: {e}")
 DEFAULT_CONFIG: Dict[str, Any] = {
     "email": "",
     "password": "",
     "saved_at": "",
-    "activity_name": "Название мероприятия",
-    "activity_datetime": "01.09.2026 11:00",
-    "confirm_activity_name": "Название мероприятия",
-    "program_name": "Название программы",
-    "program_event_id": "",
-    "program_group_name": "Название группы",
-    "program_group_id": "",
+    "activity_name": "Мастер-класс по анимации в ДОЛ Горный воздух",
+    "activity_datetime": "2026-08-31 11:00:00",
+    "confirm_activity_name": "Мастер-класс по анимации в ДОЛ Горный воздух",
+    "program_name": '"Мобильный Технопарк VR/AR/IT" (ПДО Габдрахманов Л.И.)',
+    "program_event_id": "41675",
+    "program_group_name": "Краснокамский р-н",
+    "program_group_id": "118318",
     "program_academic_year_id": "2026/2027",
     "program_use_certificate": False,
     "program_create_certificate": True,
-    "study_program_name": "Название программы",
-    "study_program_group_name": "Название группы",
+    "study_program_name": '"Мобильный Технопарк VR/AR/IT" (ПДО Габдрахманов Л.И.)',
+    "study_program_group_name": "",
     "study_academic_year_id": "2026/2027",
     "study_decree_number": "183",
-    "study_date_signing": "31.08.2026",
-    "study_date_start": "01.09.2026",
+    "study_date_signing": "2026-08-31",
+    "study_date_start": "2026-09-01",
     "study_financing_source": "1",
-    "study_verify_excel": True,
-    "history": {
-        "email": [],
-        "activity_name": [],
-        "activity_datetime": ["01.09.2026 11:00", "2026-08-31 10:00:00", "2026-09-01 12:00:00"],
-        "program_name": [],
-        "program_group_name": [],
-        "academic_year_id": ["2026/2027", "2025/2026", "2026"],
-        "decree_number": ["183", "124", "1"],
-        "date_signing": ["31.08.2026", "2026-08-31", "01.09.2026"],
-        "date_start": ["01.09.2026", "2026-09-01", "15.09.2026"],
-    }
 }
 
 
 def load_config() -> Dict[str, Any]:
-    """Загружает конфиг, объединяя сохраненные параметры с дефолтными значениями-примерами и историей."""
+    """Загружает конфиг, объединяя сохраненные параметры с дефолтными значениями-примерами."""
     cfg = dict(DEFAULT_CONFIG)
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
                 if isinstance(loaded, dict):
-                    loaded_hist = loaded.get("history", {})
-                    base_hist = dict(DEFAULT_CONFIG.get("history", {}))
-                    if isinstance(loaded_hist, dict):
-                        base_hist.update(loaded_hist)
                     cfg.update(loaded)
-                    cfg["history"] = base_hist
         except Exception:
             pass
     else:
@@ -367,82 +153,6 @@ def load_config() -> Dict[str, Any]:
         except Exception:
             pass
     return cfg
-
-
-def get_field_history(field_key: str, max_items: int = 30) -> List[str]:
-    """Возвращает упорядоченный список ранее использованных значений для поля из config.json."""
-    cfg = load_config()
-    history = cfg.get("history", {})
-    if not isinstance(history, dict):
-        history = {}
-    items = history.get(field_key, [])
-    if not isinstance(items, list):
-        items = []
-
-    res: List[str] = []
-
-    # 1. Сначала добавляем элементы из истории в порядке недавнего использования (MRU)
-    for it in items:
-        s = str(it).strip()
-        if s and s not in res and not s.startswith("Название "):
-            res.append(s)
-
-    # 2. Подтягиваем текущие значения из config.json (включая альтернативные ключи старых версий)
-    field_to_cfg_keys = {
-        "activity_name": ["activity_name", "confirm_activity_name"],
-        "activity_datetime": ["activity_datetime"],
-        "program_name": ["study_program_name", "program_name"],
-        "program_group_name": ["study_program_group_name", "program_group_name"],
-        "academic_year_id": ["study_academic_year_id", "program_academic_year_id"],
-        "decree_number": ["study_decree_number"],
-        "date_signing": ["study_date_signing"],
-        "date_start": ["study_date_start"],
-        "email": ["email"]
-    }
-    check_keys = field_to_cfg_keys.get(field_key, [field_key])
-    for ck in check_keys:
-        curr_val = str(cfg.get(ck, "")).strip()
-        if curr_val and curr_val not in res and not curr_val.startswith("Название "):
-            res.append(curr_val)
-
-    # 3. Если список пуст или мал, подмешиваем дефолтные подсказки
-    def_hist = DEFAULT_CONFIG.get("history", {}).get(field_key, [])
-    for d in def_hist:
-        sd = str(d).strip()
-        if sd and sd not in res and not sd.startswith("Название "):
-            res.append(sd)
-
-    return res[:max_items]
-
-
-def add_to_field_history(field_key: str, value: str, max_items: int = 30) -> List[str]:
-    """Добавляет новое значение в историю поля в config.json (ставит его наверх списка MRU)."""
-    val = str(value).strip()
-    if not val or val.startswith("Название "):
-        return get_field_history(field_key, max_items)
-
-    cfg = load_config()
-    history = cfg.get("history", {})
-    if not isinstance(history, dict):
-        history = {}
-
-    curr_list = history.get(field_key, [])
-    if not isinstance(curr_list, list):
-        curr_list = []
-
-    # Перемещаем значение на первое место без дублирования
-    new_list = [val] + [str(x).strip() for x in curr_list if str(x).strip() != val and str(x).strip() and not str(x).strip().startswith("Название ")]
-    history[field_key] = new_list[:max_items]
-    cfg["history"] = history
-    cfg["saved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-
-    try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Ошибка сохранения истории в config.json: {e}")
-
-    return history[field_key]
 
 
 def save_config(email: str, password: str) -> None:
@@ -501,8 +211,8 @@ def ensure_default_excel(file_path: str = EVENT_EXCEL_FILE):
             ws.cell(row=1, column=2, value="Дата рождения")
             ws.cell(row=1, column=3, value="Статус заявки")
             # Пример строки
-            ws.cell(row=2, column=1, value="Фамилия Имя Отчество")
-            ws.cell(row=2, column=2, value="22.08.1998")
+            ws.cell(row=2, column=1, value="Солодовникова Романа Александровна")
+            ws.cell(row=2, column=2, value="23.06.2005")
             ws.cell(row=2, column=3, value="")  # Пустое: ребенок еще не обработан
             ws.column_dimensions["A"].width = 38
             ws.column_dimensions["B"].width = 20
@@ -525,70 +235,10 @@ def ensure_default_excel(file_path: str = EVENT_EXCEL_FILE):
         print(f"Не удалось инициализировать {file_path}: {e}")
 
 
-def ensure_study_excel(file_path: str = STUDY_EXCEL_FILE):
-    """
-    Создает или проверяет отдельную таблицу для подтверждения и отметки на обучение (study_list.xlsx).
-    Содержит ровно 2 столбца:
-      1. ФИО (Полное имя ребенка)
-      2. Флаг зачисления (переключается при подтверждении и зачислении на программу)
-    """
-    try:
-        import openpyxl
-        if not os.path.exists(file_path):
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = "Обучение"
-            # Ровно 2 столбца
-            ws.cell(row=1, column=1, value="ФИО")
-            ws.cell(row=1, column=2, value="Флаг зачисления")
-
-            # Если в programm_list.xlsx уже есть дети, переносим их ФИО для удобства пользователя
-            seeded = False
-            if os.path.exists(PROGRAM_EXCEL_FILE):
-                try:
-                    p_wb = openpyxl.load_workbook(PROGRAM_EXCEL_FILE, data_only=True)
-                    p_ws = p_wb.active
-                    r_out = 2
-                    for r_in in range(2, p_ws.max_row + 1):
-                        val = p_ws.cell(r_in, 1).value
-                        if val and str(val).strip():
-                            ws.cell(row=r_out, column=1, value=str(val).strip())
-                            ws.cell(row=r_out, column=2, value="")
-                            r_out += 1
-                            seeded = True
-                    p_wb.close()
-                except Exception:
-                    pass
-
-            if not seeded:
-                ws.cell(row=2, column=1, value="")
-                ws.cell(row=2, column=2, value="")
-
-            ws.column_dimensions["A"].width = 42
-            ws.column_dimensions["B"].width = 34
-            wb.save(file_path)
-            wb.close()
-        else:
-            # Если файл существует, проверяем наличие 2-го столбца с флагом
-            try:
-                wb = openpyxl.load_workbook(file_path)
-                ws = wb.active
-                if ws.max_column < 2 or not ws.cell(1, 2).value:
-                    ws.cell(row=1, column=2, value="Флаг зачисления")
-                    ws.column_dimensions["B"].width = 34
-                    wb.save(file_path)
-                wb.close()
-            except Exception:
-                pass
-    except Exception as e:
-        print(f"Не удалось инициализировать {file_path}: {e}")
-
-
 def ensure_all_excel_files():
-    """Гарантирует существование всех таблиц: event_list.xlsx, programm_list.xlsx и study_list.xlsx."""
+    """Гарантирует существование обоих файлов: event_list.xlsx и programm_list.xlsx."""
     ensure_default_excel(EVENT_EXCEL_FILE)
     ensure_default_excel(PROGRAM_EXCEL_FILE)
-    ensure_study_excel(STUDY_EXCEL_FILE)
 
 
 def update_excel_cell_status(file_path: str, row_num: int, status_text: str, col_num: int = 3) -> Tuple[bool, str]:
@@ -629,27 +279,21 @@ class AdaptiveRateLimiter:
     - При росте времени отклика сервера задержка динамически увеличивается (до 2.5 - 4.5 сек).
     - При получении HTTP 429/502/503/504 включается аварийная защитная пауза (6 - 10 сек).
     """
-    def __init__(self, min_interval: float = 1.2, abort_checker: Optional[Callable[[], bool]] = None):
+    def __init__(self, min_interval: float = 1.2):
         # Гарантируем, что интервал не может быть меньше 1.0 с (не более 1 запроса в секунду)
         self.min_interval = max(1.0, float(min_interval))
         self.current_delay = self.min_interval
         self.last_request_time = 0.0
         self.last_latency_ms: Optional[float] = None
         self.last_status_code: int = 200
-        self.abort_checker = abort_checker
 
     def wait_before_request(self) -> float:
-        """Блокирует поток на необходимое время, гарантируя соблюдение паузы между запросами (с мгновенным выходом при прерывании)."""
+        """Блокирует поток на необходимое время, гарантируя соблюдение паузы между запросами."""
         now = time.time()
         elapsed = now - self.last_request_time
         needed_wait = self.current_delay - elapsed
         if needed_wait > 0:
-            step = 0.05
-            while needed_wait > 0:
-                if self.abort_checker and self.abort_checker():
-                    break
-                time.sleep(min(step, needed_wait))
-                needed_wait -= step
+            time.sleep(needed_wait)
         self.last_request_time = time.time()
         return self.current_delay
 
@@ -709,29 +353,13 @@ class NavigatorClient:
         self.limiter = AdaptiveRateLimiter(min_interval=1.2)
         self.on_ping_update: Optional[Callable[[float, str, str, float], None]] = None
         self.on_log_message: Optional[Callable[[str, Optional[str]], None]] = None
-        self.abort_checker: Optional[Callable[[], bool]] = None
-
-    def is_aborted(self) -> bool:
-        """Проверяет, запросил ли пользователь остановку операции."""
-        if hasattr(self, "abort_checker") and self.abort_checker and self.abort_checker():
-            return True
-        return False
 
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
-        """Выполняет запрос с соблюдением адаптивного лимита скорости, перехватом задержки и проверкой прерывания."""
-        if self.is_aborted():
-            raise InterruptedError("Операция прервана пользователем")
-
+        """Выполняет запрос с соблюдением адаптивного лимита скорости и перехватом задержки."""
         max_retries = 2
         for attempt in range(max_retries + 1):
-            if self.is_aborted():
-                raise InterruptedError("Операция прервана пользователем")
-
             # Соблюдаем безопасную паузу: не более 1 запроса в секунду
             cur_delay = self.limiter.wait_before_request()
-
-            if self.is_aborted():
-                raise InterruptedError("Операция прервана пользователем")
 
             start_t = time.perf_counter()
             try:
@@ -753,19 +381,11 @@ class NavigatorClient:
                             f"⚠️ [Защита сервера] Код {resp.status_code}. Пауза {wait_time:.1f}с перед повторной попыткой...",
                             "yellow"
                         )
-                    step = 0.1
-                    rem = wait_time
-                    while rem > 0:
-                        if self.is_aborted():
-                            raise InterruptedError("Операция прервана пользователем")
-                        time.sleep(min(step, rem))
-                        rem -= step
+                    time.sleep(wait_time)
                     continue
 
                 return resp
             except Exception as exc:
-                if isinstance(exc, InterruptedError):
-                    raise exc
                 lat_ms = (time.perf_counter() - start_t) * 1000.0
                 label, new_delay, color = self.limiter.record_response(lat_ms, 504)
                 if self.on_ping_update:
@@ -774,13 +394,7 @@ class NavigatorClient:
                     except Exception:
                         pass
                 if attempt < max_retries:
-                    step = 0.1
-                    rem = 3.0
-                    while rem > 0:
-                        if self.is_aborted():
-                            raise InterruptedError("Операция прервана пользователем")
-                        time.sleep(min(step, rem))
-                        rem -= step
+                    time.sleep(3.0)
                     continue
                 raise exc
         return resp
@@ -1504,7 +1118,6 @@ class NavigatorClient:
         # Маркеры успешной обработки заявки (включая запись на мероприятие и зачисление на программу)
         processed_keywords = ["добавлен", "обработан", "успешно", "заявка", "зачислен", "да", "ок", "ok", "+", "true", "1"]
 
-        dirty = False
         records = []
         for r in range(2, ws.max_row + 1):
             fio = ws.cell(r, fio_col).value
@@ -1512,119 +1125,22 @@ class NavigatorClient:
             raw_status = ws.cell(r, status_col).value if ws.max_column >= status_col else None
             status_str = str(raw_status).strip() if raw_status is not None else ""
 
-            if not fio or not str(fio).strip():
-                continue
-            fio_str = str(fio).strip()
-
-            # Проверка формата ФИО (защита от инициалов вроде 'Иванов И.И.')
-            is_valid_fmt, fmt_err = check_fio_format(fio_str)
-            if not is_valid_fmt:
-                err_marker = "⚠️ Неправильный формат (инициалы: укажите Фамилию и полное Имя)" if "инициал" in fmt_err else f"⚠️ {fmt_err}"
-                if not status_str or ("неправильный формат" not in status_str.lower() and "инициал" not in status_str.lower()):
-                    status_str = err_marker
-                    ws.cell(r, status_col, value=status_str)
-                    dirty = True
-
             # Если в статусе уже зафиксировано успешное добавление
             is_processed = bool(
                 status_str and any(kw in status_str.lower() for kw in processed_keywords)
             )
 
-            records.append({
-                "row": r,
-                "fio": fio_str,
-                "dob": dob,
-                "status": status_str,
-                "is_processed": is_processed,
-                "is_valid_format": is_valid_fmt,
-                "format_error": fmt_err if not is_valid_fmt else "",
-                "status_col": status_col,
-            })
-
-        if dirty:
-            try:
-                wb.save(file_path)
-            except Exception as e:
-                print(f"Ошибка сохранения отметки формата в {file_path}: {e}")
-
+            if fio and str(fio).strip():
+                records.append({
+                    "row": r,
+                    "fio": str(fio).strip(),
+                    "dob": dob,
+                    "status": status_str,
+                    "is_processed": is_processed,
+                    "status_col": status_col,
+                })
         wb.close()
         return records
-
-    def read_study_excel(self, file_path: str = STUDY_EXCEL_FILE) -> List[Dict[str, Any]]:
-        """
-        Считывает отдельную 2-колоночную таблицу (study_list.xlsx).
-        Столбец 1: ФИО ребенка
-        Столбец 2: Флаг зачисления
-        Возвращает список записей с информацией о строке, ФИО, текущем флаге и маркерах подтверждения/зачисления.
-        """
-        try:
-            import openpyxl
-        except ImportError:
-            raise ImportError("Необходимо установить openpyxl: pip install openpyxl")
-
-        if not os.path.exists(file_path):
-            ensure_study_excel(file_path)
-
-        wb = openpyxl.load_workbook(file_path, data_only=True)
-        ws = wb.active
-        fio_col = 1
-        flag_col = 2
-
-        for col in range(1, min(ws.max_column + 1, 10)):
-            val = str(ws.cell(1, col).value or "").strip().lower()
-            if "фио" in val or "ребенок" in val or "фамилия" in val or "ученик" in val:
-                fio_col = col
-            elif "флаг" in val or "статус" in val or "зачисл" in val or "подтвержд" in val:
-                flag_col = col
-
-        records = []
-        dirty = False
-        for r in range(2, ws.max_row + 1):
-            fio_val = ws.cell(r, fio_col).value
-            if not fio_val or not str(fio_val).strip():
-                continue
-            fio_str = str(fio_val).strip()
-            raw_flag = ws.cell(r, flag_col).value if ws.max_column >= flag_col else None
-            flag_str = str(raw_flag).strip() if raw_flag is not None else ""
-
-            # Проверка формата ФИО (защита от инициалов вроде 'Иванов И.И.')
-            is_valid_fmt, fmt_err = check_fio_format(fio_str)
-            if not is_valid_fmt:
-                # Если в ячейке флага еще не зафиксировано предупреждение о неправильном формате,
-                # отмечаем в столбце флага Excel как неправильный формат
-                err_marker = "⚠️ Неправильный формат (инициалы: укажите Фамилию и полное Имя)" if "инициал" in fmt_err else f"⚠️ {fmt_err}"
-                if not flag_str or ("неправильный формат" not in flag_str.lower() and "инициал" not in flag_str.lower()):
-                    flag_str = err_marker
-                    ws.cell(r, flag_col, value=flag_str)
-                    dirty = True
-
-            flag_lower = flag_str.lower()
-            is_confirmed = any(kw in flag_lower for kw in ["подтвержд", "approve", "подтвержден"])
-            is_enrolled = any(kw in flag_lower for kw in ["зачислен", "study", "приказ", "обучение"])
-
-            records.append({
-                "row": r,
-                "fio": fio_str,
-                "flag": flag_str,
-                "is_valid_format": is_valid_fmt,
-                "format_error": fmt_err if not is_valid_fmt else "",
-                "is_confirmed": is_confirmed,
-                "is_enrolled": is_enrolled,
-                "flag_col": flag_col,
-            })
-
-        if dirty:
-            try:
-                wb.save(file_path)
-            except Exception as e:
-                print(f"Ошибка сохранения отметки формата в {file_path}: {e}")
-
-        wb.close()
-        return records
-
-    def update_study_child_flag(self, file_path: str, row_num: int, flag_text: str, col_num: int = 2) -> Tuple[bool, str]:
-        """Обновляет флаг подтверждения/зачисления ребенка в таблице study_list.xlsx."""
-        return update_excel_cell_status(file_path, row_num, flag_text, col_num)
 
 
 # =========================================================================
@@ -1667,9 +1183,9 @@ def setup_universal_clipboard(root: tk.Tk):
 
     def get_focused_entry(event=None):
         w = root.focus_get()
-        if isinstance(w, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text)):
+        if isinstance(w, (tk.Entry, ttk.Entry, tk.Text)):
             return w
-        if event and hasattr(event, "widget") and isinstance(event.widget, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text)):
+        if event and hasattr(event, "widget") and isinstance(event.widget, (tk.Entry, ttk.Entry, tk.Text)):
             return event.widget
         return None
 
@@ -1755,7 +1271,7 @@ def setup_universal_clipboard(root: tk.Tk):
 
     def show_context_menu(event):
         widget = event.widget
-        if isinstance(widget, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text)):
+        if isinstance(widget, (tk.Entry, ttk.Entry, tk.Text)):
             widget.focus_set()
             try:
                 menu.tk_popup(event.x_root, event.y_root)
@@ -1769,7 +1285,7 @@ def setup_universal_clipboard(root: tk.Tk):
     # Обработчик нажатия клавиш с проверкой Control / Command
     def on_global_key(event):
         widget = event.widget
-        if not isinstance(widget, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text)):
+        if not isinstance(widget, (tk.Entry, ttk.Entry, tk.Text)):
             return
 
         # Маска Control: 0x4 (Windows/Linux) или Command (Mac)
@@ -1816,15 +1332,6 @@ class NavigatorApp:
 
         self.client = NavigatorClient()
         self.saved_cfg = load_config()
-
-        # Флаги выполнения фоновых задач и аварийной остановки
-        self.stop_requested = False
-        self.is_task_running = False
-        self.current_task_name = ""
-
-        # Привязываем проверку прерывания к REST-клиенту и регулятору частоты
-        self.client.abort_checker = lambda: getattr(self, "stop_requested", False)
-        self.client.limiter.abort_checker = lambda: getattr(self, "stop_requested", False)
 
         # Настраиваем мониторинг отклика сервера в реальном времени
         self.is_monitoring_active = True
@@ -1920,69 +1427,6 @@ class NavigatorApp:
         except Exception:
             pass
 
-    def setup_history_combobox(
-        self,
-        combobox: ttk.Combobox,
-        history_key: str,
-        initial_val: str,
-        on_change_callback: Optional[Callable[[], None]] = None
-    ) -> None:
-        """
-        Настраивает Combobox для поддержки истории ввода:
-        при нажатии на инпут выпадает список ранее использованных данных.
-        При выборе или завершении ввода значение автоматически сохраняется в историю.
-        """
-        items = get_field_history(history_key)
-        combobox["values"] = items
-        if initial_val:
-            combobox.set(initial_val)
-
-        def _open_dropdown(event=None):
-            # Если клик был по стрелке, ttk сам откроет/закроет выпадающий список
-            if event and hasattr(event, "x") and hasattr(event, "y"):
-                try:
-                    elem = combobox.identify(event.x, event.y)
-                    if "arrow" in elem:
-                        return
-                except Exception:
-                    pass
-
-            def _post():
-                try:
-                    fresh_items = get_field_history(history_key)
-                    if fresh_items:
-                        combobox["values"] = fresh_items
-                        try:
-                            combobox.tk.eval(f"{combobox} post")
-                        except Exception:
-                            try:
-                                combobox.event_generate("<Alt-Down>")
-                            except Exception:
-                                combobox.event_generate("<Down>")
-                except Exception:
-                    pass
-
-            combobox.after(15, _post)
-
-        # При клике на инпут раскрываем список ранее использованных данных
-        combobox.bind("<Button-1>", _open_dropdown, add="+")
-        combobox.bind("<Down>", lambda e: combobox.after(10, _open_dropdown), add="+")
-
-        def _commit(event=None):
-            val = combobox.get().strip()
-            if val and not val.startswith("Название "):
-                add_to_field_history(history_key, val)
-                combobox["values"] = get_field_history(history_key)
-            if on_change_callback:
-                try:
-                    on_change_callback()
-                except Exception:
-                    pass
-
-        combobox.bind("<FocusOut>", _commit, add="+")
-        combobox.bind("<Return>", _commit, add="+")
-        combobox.bind("<<ComboboxSelected>>", _commit, add="+")
-
     # ---------------------------------------------------------------------
     # ЭКРАН 1: АВТОРИЗАЦИЯ (с выбором: прошлый или новый пользователь)
     # ---------------------------------------------------------------------
@@ -2020,9 +1464,8 @@ class NavigatorApp:
         new_box.pack(fill=tk.X)
 
         ttk.Label(new_box, text="Email / Логин:").pack(anchor=tk.W)
-        self.entry_email = ttk.Combobox(new_box, width=38, font=("Segoe UI", 10))
+        self.entry_email = ttk.Entry(new_box, width=38, font=("Segoe UI", 10))
         self.entry_email.pack(fill=tk.X, pady=(2, 8))
-        self.setup_history_combobox(self.entry_email, "email", self.saved_cfg.get("email", ""))
 
         ttk.Label(new_box, text="Пароль:").pack(anchor=tk.W)
         self.entry_password = ttk.Entry(new_box, width=38, show="•", font=("Segoe UI", 10))
@@ -2047,7 +1490,6 @@ class NavigatorApp:
         if not email or not pwd:
             messagebox.showwarning("Внимание", "Пожалуйста, заполните email и пароль.")
             return
-        add_to_field_history("email", email)
         if self.var_save_pass.get():
             save_config(email, pwd)
             self.saved_cfg = load_config()
@@ -2066,12 +1508,8 @@ class NavigatorApp:
     def _on_login_result(self, ok: bool, msg: str, email: str, pwd: str):
         if ok:
             save_config(email, pwd)
-            u_info = getattr(self.client, "user_info", {}) or {}
-            user_title = u_info.get("name") or u_info.get("email") or email
-            write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔑 УСПЕШНАЯ АВТОРИЗАЦИЯ: {user_title} ({email})")
             self.show_main_dashboard()
         else:
-            write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ ОШИБКА АВТОРИЗАЦИИ: {email} | {msg}")
             self.login_status_lbl.config(text=f"Ошибка: {msg}", foreground="red")
             messagebox.showerror("Ошибка входа", msg)
 
@@ -2092,19 +1530,11 @@ class NavigatorApp:
         btn_box = ttk.Frame(top_bar)
         btn_box.pack(side=tk.RIGHT)
 
-        log_btn_title = f"📋 Лог ({os.path.basename(CURRENT_LOG_FILE)})" if CURRENT_LOG_FILE else "📋 Журнал сессии"
-        ttk.Button(btn_box, text="📊 event_list.xlsx", command=lambda: open_file_in_os(EVENT_EXCEL_FILE)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_box, text="🎓 programm_list.xlsx", command=lambda: open_file_in_os(PROGRAM_EXCEL_FILE)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_box, text="📑 study_list.xlsx", command=lambda: open_file_in_os(STUDY_EXCEL_FILE)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_box, text=log_btn_title, command=lambda: open_file_in_os(CURRENT_LOG_FILE or LOG_FILE)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_box, text="📁 Папка логов", command=lambda: open_file_in_os(os.path.abspath(LOGS_DIR))).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_box, text="⚙ config.json", command=lambda: open_file_in_os(CONFIG_FILE)).pack(side=tk.LEFT, padx=2)
-        
-        def _on_logout():
-            write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🚪 ВЫХОД ИЗ УЧЕТНОЙ ЗАПИСИ: {user_name}")
-            self.show_login_screen()
-
-        ttk.Button(btn_box, text="Выйти", command=_on_logout).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_box, text="📊 event_list.xlsx", command=lambda: open_file_in_os(EVENT_EXCEL_FILE)).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_box, text="🎓 programm_list.xlsx", command=lambda: open_file_in_os(PROGRAM_EXCEL_FILE)).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_box, text="📋 results_log.txt", command=lambda: open_file_in_os(LOG_FILE)).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_box, text="⚙ config.json", command=lambda: open_file_in_os(CONFIG_FILE)).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btn_box, text="Выйти", command=self.show_login_screen).pack(side=tk.LEFT, padx=3)
 
         # Разделитель
         ttk.Separator(self.main_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 8))
@@ -2147,20 +1577,9 @@ class NavigatorApp:
         initial_datetime = self.saved_cfg.get("activity_datetime") or DEFAULT_CONFIG["activity_datetime"]
         initial_confirm_act = self.saved_cfg.get("confirm_activity_name") or initial_activity
 
-        # Основной блок с режимами работы (Мероприятия, Подтверждение, Зачисление на программу, Подтверждение и обучение)
+        # Основной блок с режимами работы (Мероприятия, Подтверждение, Зачисление на программу)
         tabs = ttk.Notebook(self.main_frame)
         tabs.pack(fill=tk.X, pady=(0, 10))
-
-        def _on_tab_changed(event):
-            try:
-                sel_id = tabs.select()
-                if sel_id:
-                    tab_name = tabs.tab(sel_id, "text")
-                    write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📌 ПЕРЕКЛЮЧЕНИЕ НА ВКЛАДКУ: {tab_name.strip()}")
-            except Exception:
-                pass
-
-        tabs.bind("<<NotebookTabChanged>>", _on_tab_changed)
 
         # --- ВКЛАДКА 1: ПАКЕТНАЯ ЗАПИСЬ (NavAdd) ---
         tab_add = ttk.Frame(tabs, padding=12)
@@ -2173,8 +1592,9 @@ class NavigatorApp:
         add_event_box.grid(row=0, column=1, columnspan=2, sticky=tk.W + tk.E, pady=(4, 0))
         add_event_box.columnconfigure(0, weight=1)
 
-        self.entry_add_event = ttk.Combobox(add_event_box, font=("Segoe UI", 10))
+        self.entry_add_event = ttk.Entry(add_event_box, font=("Segoe UI", 10))
         self.entry_add_event.grid(row=0, column=0, sticky=tk.W + tk.E, padx=(0, 6))
+        self.entry_add_event.insert(0, initial_activity)
 
         self.btn_check_add_event = ttk.Button(
             add_event_box,
@@ -2186,16 +1606,17 @@ class NavigatorApp:
         # Подсказка-пример валидного ввода для мероприятия
         ttk.Label(
             tab_add,
-            text="💡 Нажмите на поле для выбора из истории. Пример: Мастер-класс по анимации в ДОЛ Горный воздух",
+            text="Пример: Мастер-класс по анимации в ДОЛ Горный воздух (сохраняется в config.json)",
             foreground="#64748b",
             font=("Segoe UI", 8)
         ).grid(row=1, column=1, columnspan=2, sticky=tk.W, pady=(0, 6))
 
         ttk.Label(tab_add, text="Дата и время участия:").grid(row=2, column=0, sticky=tk.W, pady=(4, 0))
-        self.entry_add_dt = ttk.Combobox(tab_add, font=("Segoe UI", 10))
+        self.entry_add_dt = ttk.Entry(tab_add, font=("Segoe UI", 10))
         self.entry_add_dt.grid(row=2, column=1, columnspan=2, sticky=tk.W + tk.E, pady=(4, 0))
+        self.entry_add_dt.insert(0, initial_datetime)
 
-        # Привязываем авто-сохранение в config.json
+        # Привязываем авто-сохранение в config.json при потере фокуса (FocusOut)
         def save_add_fields(event=None):
             try:
                 name = self.entry_add_event.get().strip() if hasattr(self, "entry_add_event") else ""
@@ -2206,8 +1627,8 @@ class NavigatorApp:
             except Exception:
                 pass
 
-        self.setup_history_combobox(self.entry_add_event, "activity_name", initial_activity, save_add_fields)
-        self.setup_history_combobox(self.entry_add_dt, "activity_datetime", initial_datetime, save_add_fields)
+        self.entry_add_event.bind("<FocusOut>", save_add_fields)
+        self.entry_add_dt.bind("<FocusOut>", save_add_fields)
 
         # Подсказка-пример валидного формата даты/времени
         ttk.Label(
@@ -2237,8 +1658,9 @@ class NavigatorApp:
         conf_event_box.grid(row=0, column=1, sticky=tk.W + tk.E, pady=(4, 0))
         conf_event_box.columnconfigure(0, weight=1)
 
-        self.entry_conf_event = ttk.Combobox(conf_event_box, font=("Segoe UI", 10))
+        self.entry_conf_event = ttk.Entry(conf_event_box, font=("Segoe UI", 10))
         self.entry_conf_event.grid(row=0, column=0, sticky=tk.W + tk.E, padx=(0, 6))
+        self.entry_conf_event.insert(0, initial_confirm_act)
 
         self.btn_check_conf_event = ttk.Button(
             conf_event_box,
@@ -2256,11 +1678,11 @@ class NavigatorApp:
             except Exception:
                 pass
 
-        self.setup_history_combobox(self.entry_conf_event, "activity_name", initial_confirm_act, save_conf_fields)
+        self.entry_conf_event.bind("<FocusOut>", save_conf_fields)
 
         ttk.Label(
             tab_conf,
-            text="💡 Нажмите на поле для выбора из истории. Пример: Мастер-класс по анимации в ДОЛ Горный воздух",
+            text="Пример: Мастер-класс по анимации в ДОЛ Горный воздух (сохраняется в config.json)",
             foreground="#64748b",
             font=("Segoe UI", 8)
         ).grid(row=1, column=1, sticky=tk.W, pady=(0, 6))
@@ -2319,8 +1741,9 @@ class NavigatorApp:
         tab_program.columnconfigure(1, weight=1)
         prog_name_box.columnconfigure(0, weight=1)
 
-        self.entry_prog_name = ttk.Combobox(prog_name_box, font=("Segoe UI", 10))
+        self.entry_prog_name = ttk.Entry(prog_name_box, font=("Segoe UI", 10))
         self.entry_prog_name.grid(row=0, column=0, sticky=tk.W + tk.E, padx=(0, 6))
+        self.entry_prog_name.insert(0, initial_prog_name)
 
         self.btn_check_prog = ttk.Button(
             prog_name_box,
@@ -2331,7 +1754,7 @@ class NavigatorApp:
 
         ttk.Label(
             tab_program,
-            text="💡 Нажмите на поле для выбора из истории. Поиск в Навигаторе (GET /api/rest/events).",
+            text="Поиск в Навигаторе по названию (GET /api/rest/events). ID программы определяется автоматически.",
             foreground="#64748b",
             font=("Segoe UI", 8)
         ).grid(row=1, column=1, sticky=tk.W, pady=(0, 4))
@@ -2343,8 +1766,9 @@ class NavigatorApp:
         prog_group_box.grid(row=2, column=1, sticky=tk.W + tk.E, pady=(3, 0))
         prog_group_box.columnconfigure(0, weight=1)
 
-        self.entry_prog_group = ttk.Combobox(prog_group_box, font=("Segoe UI", 10))
+        self.entry_prog_group = ttk.Entry(prog_group_box, font=("Segoe UI", 10))
         self.entry_prog_group.grid(row=0, column=0, sticky=tk.W + tk.E, padx=(0, 6))
+        self.entry_prog_group.insert(0, initial_prog_group)
 
         self.btn_check_group = ttk.Button(
             prog_group_box,
@@ -2355,19 +1779,20 @@ class NavigatorApp:
 
         ttk.Label(
             tab_program,
-            text="💡 Нажмите на поле для истории. Поиск по названию (GET /api/rest/eventGroups) или точный ID.",
+            text="Поиск по названию (GET /api/rest/eventGroups). Если групп несколько, укажите точный ID группы.",
             foreground="#64748b",
             font=("Segoe UI", 8)
         ).grid(row=3, column=1, sticky=tk.W, pady=(0, 4))
 
         # academic_year_id (поддержка обоих форматов: 2026/2027 и 2026)
         ttk.Label(tab_program, text="Учебный год (2026/2027 или 2026):").grid(row=4, column=0, sticky=tk.W, pady=(3, 0))
-        self.entry_prog_year = ttk.Combobox(tab_program, font=("Segoe UI", 10))
+        self.entry_prog_year = ttk.Entry(tab_program, font=("Segoe UI", 10))
         self.entry_prog_year.grid(row=4, column=1, sticky=tk.W + tk.E, pady=(3, 0))
+        self.entry_prog_year.insert(0, initial_prog_year)
 
         ttk.Label(
             tab_program,
-            text="Поддерживает форматы: 2026/2027 или 2026 (в Навигатор передается academic_year_id=2026)",
+            text="Поддерживает оба формата: 2026/2027 или 2026 (в Навигатор передается academic_year_id=2026, сохраняется в config.json)",
             foreground="#64748b",
             font=("Segoe UI", 8)
         ).grid(row=5, column=1, sticky=tk.W, pady=(0, 5))
@@ -2411,9 +1836,9 @@ class NavigatorApp:
             except Exception:
                 pass
 
-        self.setup_history_combobox(self.entry_prog_name, "program_name", initial_prog_name, save_prog_fields)
-        self.setup_history_combobox(self.entry_prog_group, "program_group_name", initial_prog_group, save_prog_fields)
-        self.setup_history_combobox(self.entry_prog_year, "academic_year_id", initial_prog_year, save_prog_fields)
+        self.entry_prog_name.bind("<FocusOut>", save_prog_fields)
+        self.entry_prog_group.bind("<FocusOut>", save_prog_fields)
+        self.entry_prog_year.bind("<FocusOut>", save_prog_fields)
         self.chk_prog_create_cert.configure(command=save_prog_fields)
         self.chk_prog_use_cert.configure(command=save_prog_fields)
 
@@ -2454,8 +1879,9 @@ class NavigatorApp:
         tab_study.columnconfigure(1, weight=1)
         study_prog_box.columnconfigure(0, weight=1)
 
-        self.entry_study_prog = ttk.Combobox(study_prog_box, font=("Segoe UI", 10))
+        self.entry_study_prog = ttk.Entry(study_prog_box, font=("Segoe UI", 10))
         self.entry_study_prog.grid(row=0, column=0, sticky=tk.W + tk.E, padx=(0, 6))
+        self.entry_study_prog.insert(0, initial_study_prog)
 
         self.btn_check_study_prog = ttk.Button(
             study_prog_box,
@@ -2466,7 +1892,7 @@ class NavigatorApp:
 
         ttk.Label(
             tab_study,
-            text="💡 Нажмите на поле для выбора из истории. Поиск программы в Навигаторе (GET /api/rest/events).",
+            text="Поиск программы в Навигаторе (GET /api/rest/events). ID определяется автоматически.",
             foreground="#64748b",
             font=("Segoe UI", 8)
         ).grid(row=1, column=1, sticky=tk.W, pady=(0, 4))
@@ -2477,8 +1903,9 @@ class NavigatorApp:
         study_group_box.grid(row=2, column=1, sticky=tk.W + tk.E, pady=(3, 0))
         study_group_box.columnconfigure(0, weight=1)
 
-        self.entry_study_group = ttk.Combobox(study_group_box, font=("Segoe UI", 10))
+        self.entry_study_group = ttk.Entry(study_group_box, font=("Segoe UI", 10))
         self.entry_study_group.grid(row=0, column=0, sticky=tk.W + tk.E, padx=(0, 6))
+        self.entry_study_group.insert(0, initial_study_group)
 
         self.btn_check_study_group = ttk.Button(
             study_group_box,
@@ -2489,15 +1916,16 @@ class NavigatorApp:
 
         ttk.Label(
             tab_study,
-            text="💡 Нажмите на поле для истории. Оставьте пустым для зачисления ВСЕХ групп, либо укажите название/ID.",
+            text="Оставьте пустым для зачисления ВСЕХ групп программы, либо укажите название или точный ID группы.",
             foreground="#2563eb",
             font=("Segoe UI", 8, "italic")
         ).grid(row=3, column=1, sticky=tk.W, pady=(0, 4))
 
         # Учебный год
         ttk.Label(tab_study, text="Учебный год:").grid(row=4, column=0, sticky=tk.W, pady=(3, 0))
-        self.entry_study_year = ttk.Combobox(tab_study, font=("Segoe UI", 10))
+        self.entry_study_year = ttk.Entry(tab_study, font=("Segoe UI", 10))
         self.entry_study_year.grid(row=4, column=1, sticky=tk.W + tk.E, pady=(3, 0))
+        self.entry_study_year.insert(0, initial_study_year)
 
         ttk.Label(
             tab_study,
@@ -2514,16 +1942,19 @@ class NavigatorApp:
         decree_frame.columnconfigure(5, weight=1)
 
         ttk.Label(decree_frame, text="№ приказа:").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
-        self.entry_study_decree = ttk.Combobox(decree_frame, font=("Segoe UI", 9))
+        self.entry_study_decree = ttk.Entry(decree_frame, font=("Segoe UI", 9))
         self.entry_study_decree.grid(row=0, column=1, sticky=tk.W + tk.E, padx=(0, 10))
+        self.entry_study_decree.insert(0, initial_decree)
 
         ttk.Label(decree_frame, text="Дата приказа:").grid(row=0, column=2, sticky=tk.W, padx=(0, 4))
-        self.entry_study_signing = ttk.Combobox(decree_frame, font=("Segoe UI", 9))
+        self.entry_study_signing = ttk.Entry(decree_frame, font=("Segoe UI", 9))
         self.entry_study_signing.grid(row=0, column=3, sticky=tk.W + tk.E, padx=(0, 10))
+        self.entry_study_signing.insert(0, initial_signing)
 
         ttk.Label(decree_frame, text="Дата начала:").grid(row=0, column=4, sticky=tk.W, padx=(0, 4))
-        self.entry_study_start = ttk.Combobox(decree_frame, font=("Segoe UI", 9))
+        self.entry_study_start = ttk.Entry(decree_frame, font=("Segoe UI", 9))
         self.entry_study_start.grid(row=0, column=5, sticky=tk.W + tk.E, padx=(0, 10))
+        self.entry_study_start.insert(0, initial_start)
 
         def save_study_fields(event=None):
             try:
@@ -2536,6 +1967,14 @@ class NavigatorApp:
                 raw_start = self.entry_study_start.get().strip() if hasattr(self, "entry_study_start") else "2026-09-01"
                 sign = normalize_date_input(raw_sign, "2026-08-31")
                 st_d = normalize_date_input(raw_start, "2026-09-01")
+
+                # Обновляем поля ввода нормализованными значениями
+                if hasattr(self, "entry_study_signing"):
+                    self.entry_study_signing.delete(0, tk.END)
+                    self.entry_study_signing.insert(0, sign)
+                if hasattr(self, "entry_study_start"):
+                    self.entry_study_start.delete(0, tk.END)
+                    self.entry_study_start.insert(0, st_d)
 
                 fin = self.saved_cfg.get("study_financing_source", "1")
                 update_config(
@@ -2551,76 +1990,23 @@ class NavigatorApp:
             except Exception:
                 pass
 
-        self.setup_history_combobox(self.entry_study_prog, "program_name", initial_study_prog, save_study_fields)
-        self.setup_history_combobox(self.entry_study_group, "program_group_name", initial_study_group, save_study_fields)
-        self.setup_history_combobox(self.entry_study_year, "academic_year_id", initial_study_year, save_study_fields)
-        self.setup_history_combobox(self.entry_study_decree, "decree_number", initial_decree, save_study_fields)
-        self.setup_history_combobox(self.entry_study_signing, "date_signing", initial_signing, save_study_fields)
-        self.setup_history_combobox(self.entry_study_start, "date_start", initial_start, save_study_fields)
-
-        # Блок сверки списка детей с отдельной таблицей Excel (2 столбца: ФИО и флаг зачисления)
-        excel_verify_frame = ttk.LabelFrame(
-            tab_study,
-            text=" 📑 Сверка со списком детей из таблицы study_list.xlsx (2 столбца: ФИО и флаг) ",
-            padding=(8, 4)
-        )
-        excel_verify_frame.grid(row=7, column=0, columnspan=2, sticky=tk.W + tk.E, pady=(3, 5))
-        excel_verify_frame.columnconfigure(0, weight=1)
-
-        ev_top = ttk.Frame(excel_verify_frame)
-        ev_top.pack(fill=tk.X, expand=True)
-
-        self.var_study_verify_excel = tk.BooleanVar(
-            value=self.saved_cfg.get("study_verify_excel", True)
-        )
-        def on_toggle_verify():
-            val = self.var_study_verify_excel.get()
-            update_config(study_verify_excel=val)
-            self.saved_cfg = load_config()
-            st_text = "включена (пропуск лишних заявок)" if val else "отключена (обрабатывать все заявки с сервера)"
-            self.log(f"⚙ Сверка с таблицей study_list.xlsx {st_text}", "cyan")
-
-        chk_verify = ttk.Checkbutton(
-            ev_top,
-            text="Сверять Фамилию и Имя со study_list.xlsx (отчество игнорируется, инициалы отмечаются как ошибка)",
-            variable=self.var_study_verify_excel,
-            command=on_toggle_verify
-        )
-        chk_verify.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        ev_btn_box = ttk.Frame(ev_top)
-        ev_btn_box.pack(side=tk.RIGHT)
-
-        ttk.Button(
-            ev_btn_box,
-            text="📑 Открыть study_list.xlsx",
-            command=lambda: open_file_in_os(STUDY_EXCEL_FILE)
-        ).pack(side=tk.LEFT, padx=(4, 2))
-
-        ttk.Button(
-            ev_btn_box,
-            text="🔄 Обновить",
-            command=self.reload_study_excel_info
-        ).pack(side=tk.LEFT, padx=2)
-
-        self.lbl_study_excel_status = ttk.Label(
-            excel_verify_frame,
-            text="Таблица study_list.xlsx: 2 столбца (ФИО и флаг). Сравнение по Фамилии и Имени активно.",
-            foreground="#2563eb",
-            font=("Segoe UI", 8, "italic")
-        )
-        self.lbl_study_excel_status.pack(anchor=tk.W, pady=(2, 0))
+        self.entry_study_prog.bind("<FocusOut>", save_study_fields)
+        self.entry_study_group.bind("<FocusOut>", save_study_fields)
+        self.entry_study_year.bind("<FocusOut>", save_study_fields)
+        self.entry_study_decree.bind("<FocusOut>", save_study_fields)
+        self.entry_study_signing.bind("<FocusOut>", save_study_fields)
+        self.entry_study_start.bind("<FocusOut>", save_study_fields)
 
         self.btn_check_study_orders = ttk.Button(
             tab_study,
             text="🔍 Найти и проверить заявки программы (GET /api/rest/order)",
             command=self.check_study_program_orders
         )
-        self.btn_check_study_orders.grid(row=8, column=0, columnspan=2, sticky=tk.W + tk.E, pady=(5, 4))
+        self.btn_check_study_orders.grid(row=7, column=0, columnspan=2, sticky=tk.W + tk.E, pady=(6, 4))
 
         # Блок с кнопками действий: 1. Подтвердить, 2. Отметить обучение, 3. Зачислить всё
         study_actions = ttk.Frame(tab_study)
-        study_actions.grid(row=9, column=0, columnspan=2, sticky=tk.W + tk.E, pady=2)
+        study_actions.grid(row=8, column=0, columnspan=2, sticky=tk.W + tk.E, pady=2)
         study_actions.columnconfigure(0, weight=1)
         study_actions.columnconfigure(1, weight=1)
         study_actions.columnconfigure(2, weight=1)
@@ -2654,29 +2040,7 @@ class NavigatorApp:
             text="💡 Для подтверждения заявка должна быть initial, для отметки об обучении — approve. Кнопка 3 выполняет оба шага подряд.",
             foreground="#64748b",
             font=("Segoe UI", 8, "italic")
-        ).grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=(3, 2))
-
-        # ---------------------------------------------------------------------
-        # БОЛЬШАЯ КРАСНАЯ КНОПКА ЭКСТРЕННОГО ПРЕРЫВАНИЯ ТЕКУЩЕЙ ЗАДАЧИ
-        # ---------------------------------------------------------------------
-        abort_frame = ttk.Frame(self.main_frame)
-        abort_frame.pack(fill=tk.X, pady=(4, 8))
-
-        self.btn_abort_task = tk.Button(
-            abort_frame,
-            text="🛑 ПРЕРВАТЬ ТЕКУЩУЮ ЗАДАЧУ И ВЕРНУТЬСЯ В ИСХОДНОЕ СОСТОЯНИЕ",
-            font=("Segoe UI", 11, "bold"),
-            bg="#dc2626",
-            fg="#ffffff",
-            activebackground="#991b1b",
-            activeforeground="#ffffff",
-            relief=tk.RAISED,
-            bd=3,
-            cursor="hand2",
-            command=self.abort_current_task,
-            pady=8
-        )
-        self.btn_abort_task.pack(fill=tk.X, expand=True)
+        ).grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=(3, 2))
 
         # Консоль журнала (Лог работы)
         log_frame = ttk.LabelFrame(self.main_frame, text="Журнал операций", padding=6)
@@ -2696,188 +2060,14 @@ class NavigatorApp:
         self.txt_log.tag_config("cyan", foreground="#38bdf8")
 
         self.log("Программа готова к работе.", "cyan")
-        self.log("Заполните все поля, заполните Excel таблицу данными детей.")
-        self.log("Если не получается найти мероприятия или программу - попробуйте перезапусить приложение.")
-        self.log("Удачи!")
+        self.log(f"Таблица данных: {os.path.abspath(EXCEL_FILE)}")
+        self.log("При записи проверяются: 'is_approved': true и точное совпадение ДР.")
 
     def log(self, text: str, tag: Optional[str] = None):
         def _append():
             self.txt_log.insert(tk.END, text + "\n", tag)
             self.txt_log.see(tk.END)
         self.root.after(0, _append)
-
-        # Сквозное автоматическое сохранение всех сообщений всех вкладок в файл текущей сессии
-        try:
-            write_to_log_file(text, with_timestamp=True)
-        except Exception:
-            pass
-
-    def set_task_running(self, running: bool, task_name: str = ""):
-        """Переключает статус выполнения задачи и обновляет вид большой красной кнопки."""
-        prev_name = getattr(self, "current_task_name", "")
-        self.is_task_running = running
-        self.current_task_name = task_name if running else ""
-        if running:
-            self.stop_requested = False
-            write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ▶️ СТАРТ ВЫПОЛНЕНИЯ ЗАДАЧИ: {task_name}")
-            if hasattr(self, "btn_abort_task") and self.btn_abort_task:
-                self.btn_abort_task.config(
-                    text=f"⛔ ПРЕРВАТЬ ЗАДАЧУ: {task_name.upper()} (ВЫПОЛНЯЕТСЯ...) — НАЖМИТЕ ДЛЯ СТОПА",
-                    bg="#b91c1c",
-                    fg="#ffffff"
-                )
-        else:
-            finished_title = task_name or prev_name
-            if finished_title:
-                write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⏹️ ЗАВЕРШЕНИЕ ВЫПОЛНЕНИЯ ЗАДАЧИ: {finished_title}")
-            self.stop_requested = False
-            if hasattr(self, "btn_abort_task") and self.btn_abort_task:
-                self.btn_abort_task.config(
-                    text="🛑 ПРЕРВАТЬ ТЕКУЩУЮ ЗАДАЧУ И ВЕРНУТЬСЯ В ИСХОДНОЕ СОСТОЯНИЕ",
-                    bg="#dc2626",
-                    fg="#ffffff"
-                )
-
-    def abort_current_task(self):
-        """
-        Прерывает любую текущую задачу приложения (пакетную запись, подтверждение, зачисление)
-        и немедленно возвращает приложение в исходное рабочее состояние.
-        """
-        self.stop_requested = True
-        is_running = getattr(self, "is_task_running", False)
-        task_desc = getattr(self, "current_task_name", "")
-
-        self.log("\n" + "!" * 72, "red")
-        if is_running and task_desc:
-            self.log(f"🛑 [ПРЕРВАНО ПОЛЬЗОВАТЕЛЕМ] Нажата кнопка прерывания задачи '{task_desc}'!", "red")
-            self.log("⏳ Немедленная остановка запросов и возврат интерфейса в исходное состояние...", "yellow")
-        else:
-            self.log("🛑 [СБРОС] Принудительный возврат интерфейса приложения в исходное состояние...", "yellow")
-        self.log("!" * 72 + "\n", "red")
-
-        write_to_log_file("\n" + "!" * 80)
-        write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🛑 ПОЛЬЗОВАТЕЛЬ НАЖАЛ БОЛЬШУЮ КРАСНУЮ КНОПКУ ПРЕРЫВАНИЯ ЗАДАЧИ!")
-        write_to_log_file("!" * 80 + "\n")
-
-        if hasattr(self, "btn_abort_task") and self.btn_abort_task:
-            try:
-                self.btn_abort_task.config(
-                    text="⏳ ОСТАНОВКА... ВОЗВРАТ В ИСХОДНОЕ СОСТОЯНИЕ",
-                    bg="#7f1d1d"
-                )
-            except Exception:
-                pass
-
-        self.root.after(100, self.reset_to_initial_state)
-
-    def reset_to_initial_state(self):
-        """Восстанавливает все кнопки, поля и переключатели приложения в исходное рабочее состояние."""
-        self.is_task_running = False
-        self.stop_requested = False
-        self.current_task_name = ""
-
-        # Восстановление кнопок вкладки 1 (Запись на мероприятие)
-        if hasattr(self, "btn_run_add") and self.btn_run_add:
-            try:
-                self.btn_run_add.config(state=tk.NORMAL, text="▶ Запустить запись детей на мероприятие из таблицы")
-            except Exception:
-                pass
-        if hasattr(self, "btn_check_add_event") and self.btn_check_add_event:
-            try:
-                self.btn_check_add_event.config(state=tk.NORMAL)
-            except Exception:
-                pass
-
-        # Восстановление кнопок вкладки 2 (Подтверждение и отметка участия)
-        if hasattr(self, "btn_check_orders") and self.btn_check_orders:
-            try:
-                self.btn_check_orders.config(state=tk.NORMAL, text="🔍 Проверить статус заявок мероприятия")
-            except Exception:
-                pass
-        if hasattr(self, "btn_run_confirm") and self.btn_run_confirm:
-            try:
-                self.btn_run_confirm.config(state=tk.NORMAL, text="✓ 1. Подтвердить новые заявки")
-            except Exception:
-                pass
-        if hasattr(self, "btn_run_participant") and self.btn_run_participant:
-            try:
-                self.btn_run_participant.config(state=tk.NORMAL, text="🎖️ 2. Отметить участие")
-            except Exception:
-                pass
-        if hasattr(self, "btn_check_confirm_event") and self.btn_check_confirm_event:
-            try:
-                self.btn_check_confirm_event.config(state=tk.NORMAL)
-            except Exception:
-                pass
-
-        # Восстановление кнопок вкладки 3 (Зачисление на программу)
-        if hasattr(self, "btn_run_program") and self.btn_run_program:
-            try:
-                self.btn_run_program.config(state=tk.NORMAL, text="▶ Запустить зачисление детей на программу из таблицы")
-            except Exception:
-                pass
-        if hasattr(self, "btn_check_prog") and self.btn_check_prog:
-            try:
-                self.btn_check_prog.config(state=tk.NORMAL)
-            except Exception:
-                pass
-        if hasattr(self, "btn_check_group") and self.btn_check_group:
-            try:
-                self.btn_check_group.config(state=tk.NORMAL)
-            except Exception:
-                pass
-
-        # Восстановление кнопок вкладки 4 (Подтверждение и обучение)
-        if hasattr(self, "btn_check_study_orders") and self.btn_check_study_orders:
-            try:
-                self.btn_check_study_orders.config(state=tk.NORMAL, text="🔍 Найти и проверить заявки программы (GET /api/rest/order)")
-            except Exception:
-                pass
-        if hasattr(self, "btn_run_study_approve") and self.btn_run_study_approve:
-            try:
-                self.btn_run_study_approve.config(state=tk.NORMAL, text="✓ 1. Подтвердить заявки (initial ➜ approve)")
-            except Exception:
-                pass
-        if hasattr(self, "btn_run_study_mark") and self.btn_run_study_mark:
-            try:
-                self.btn_run_study_mark.config(state=tk.NORMAL, text="🎓 2. Отметка об обучении (approve ➜ study)")
-            except Exception:
-                pass
-        if hasattr(self, "btn_run_study_all") and self.btn_run_study_all:
-            try:
-                self.btn_run_study_all.config(state=tk.NORMAL, text="⚡ 3. Выполнить оба шага (Подтвердить + Обучение)")
-            except Exception:
-                pass
-        if hasattr(self, "btn_check_study_prog") and self.btn_check_study_prog:
-            try:
-                self.btn_check_study_prog.config(state=tk.NORMAL)
-            except Exception:
-                pass
-        if hasattr(self, "btn_check_study_group") and self.btn_check_study_group:
-            try:
-                self.btn_check_study_group.config(state=tk.NORMAL)
-            except Exception:
-                pass
-
-        # Восстановление монитора сервера
-        if hasattr(self, "btn_ping_now") and self.btn_ping_now:
-            try:
-                self.btn_ping_now.config(state=tk.NORMAL, text="🔄 Проверить отклик")
-            except Exception:
-                pass
-
-        # Восстановление большой красной кнопки
-        if hasattr(self, "btn_abort_task") and self.btn_abort_task:
-            try:
-                self.btn_abort_task.config(
-                    text="🛑 ПРЕРВАТЬ ТЕКУЩУЮ ЗАДАЧУ И ВЕРНУТЬСЯ В ИСХОДНОЕ СОСТОЯНИЕ",
-                    bg="#dc2626",
-                    fg="#ffffff"
-                )
-            except Exception:
-                pass
-
-        self.log("✓ Приложение находится в исходном состоянии, готово к выполнению команд.", "green")
 
     # ---------------------------------------------------------------------
     # ОБРАБОТЧИКИ ОПЕРАЦИЙ
@@ -2899,188 +2089,149 @@ class NavigatorApp:
         update_config(activity_name=event_name, activity_datetime=event_dt)
         self.saved_cfg = load_config()
 
-        self.set_task_running(True, "Запись на мероприятие")
         self.btn_run_add.config(state=tk.DISABLED)
         self.log("\n" + "=" * 60, "cyan")
         self.log(f"[СТАРТ] Поиск мероприятия: '{event_name}'...", "cyan")
 
         def worker():
+            act, msg = self.client.search_activity(event_name)
+            if not act:
+                self.log(f"✗ Мероприятие не найдено: {msg}", "red")
+                self.root.after(0, lambda: self.btn_run_add.config(state=tk.NORMAL))
+                return
+
+            act_id = int(act["id"])
+            self.log(f"✓ Найдено: '{act.get('name')}' (ID: {act_id})", "green")
+            self.log(f"Дата и время заявки: {event_dt}")
+
             try:
-                if getattr(self, "stop_requested", False):
-                    return
+                records = self.client.read_excel(target_excel)
+            except Exception as e:
+                self.log(f"✗ Ошибка чтения Excel: {e}", "red")
+                self.root.after(0, lambda: self.btn_run_add.config(state=tk.NORMAL))
+                return
 
-                act, msg = self.client.search_activity(event_name)
-                if getattr(self, "stop_requested", False):
-                    return
-                if not act:
-                    self.log(f"✗ Мероприятие не найдено: {msg}", "red")
-                    self.root.after(0, lambda: self.btn_run_add.config(state=tk.NORMAL))
-                    self.root.after(0, lambda: self.set_task_running(False))
-                    return
+            self.log(f"Загружено записей из таблицы ({os.path.basename(target_excel)}): {len(records)}\n", "cyan")
 
-                act_id = int(act["id"])
-                self.log(f"✓ Найдено: '{act.get('name')}' (ID: {act_id})", "green")
-                self.log(f"Дата и время заявки: {event_dt}")
+            # Записываем начало сессии в файл results_log.txt
+            start_time_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            write_to_log_file("=" * 80)
+            write_to_log_file(f"[{start_time_str}] ПАКЕТНАЯ ЗАПИСЬ ДЕТЕЙ ИЗ ТАБЛИЦЫ")
+            write_to_log_file(f"Мероприятие:         {act.get('name')} (ID: {act_id})")
+            write_to_log_file(f"Дата и время заявки: {event_dt}")
+            write_to_log_file(f"Файл таблицы:        {os.path.abspath(target_excel)} (строк: {len(records)})")
+            write_to_log_file("-" * 80)
 
-                try:
-                    records = self.client.read_excel(target_excel)
-                except Exception as e:
-                    self.log(f"✗ Ошибка чтения Excel: {e}", "red")
-                    self.root.after(0, lambda: self.btn_run_add.config(state=tk.NORMAL))
-                    self.root.after(0, lambda: self.set_task_running(False))
-                    return
+            stats = {"ok": 0, "skip_already": 0, "skip_unapproved": 0, "skip_dob": 0, "skip_notfound": 0, "err": 0}
 
-                self.log(f"Загружено записей из таблицы ({os.path.basename(target_excel)}): {len(records)}\n", "cyan")
+            for item in records:
+                r_num = item["row"]
+                fio = item["fio"]
+                raw_dob = item["dob"]
+                norm_dob = self.client._normalize_dob(raw_dob)
+                curr_status = item.get("status", "")
 
-                # Записываем начало сессии в файл results_log.txt
-                start_time_str = time.strftime("%Y-%m-%d %H:%M:%S")
-                write_to_log_file("=" * 80)
-                write_to_log_file(f"[{start_time_str}] ПАКЕТНАЯ ЗАПИСЬ ДЕТЕЙ ИЗ ТАБЛИЦЫ")
-                write_to_log_file(f"Мероприятие:         {act.get('name')} (ID: {act_id})")
-                write_to_log_file(f"Дата и время заявки: {event_dt}")
-                write_to_log_file(f"Файл таблицы:        {os.path.abspath(target_excel)} (строк: {len(records)})")
-                write_to_log_file("-" * 80)
+                # 1. Защита от дублирования заявок: если ребенок уже был успешно добавлен ранее
+                if item.get("is_processed"):
+                    stats["skip_already"] += 1
+                    self.log(f"[{r_num}] {fio} — ⏭️ ПРОПУЩЕНО: заявка уже обработана ранее ({curr_status})", "gray")
+                    write_to_log_file(
+                        f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
+                        f"          -> СТАТУС: [ПРОПУЩЕНО: УЖЕ ОБРАБОТАН] Флаг в Excel: '{curr_status}'\n"
+                    )
+                    continue
 
-                stats = {"ok": 0, "skip_already": 0, "skip_unapproved": 0, "skip_dob": 0, "skip_notfound": 0, "err": 0}
+                self.log(f"[{r_num}] {fio} (ДР: {raw_dob} -> {norm_dob or 'нет'})")
 
-                for item in records:
-                    if getattr(self, "stop_requested", False):
-                        self.log("\n🛑 [СТОП] Пакетная запись прервана пользователем!", "red")
-                        write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🛑 ПАКЕТНАЯ ЗАПИСЬ ПРЕРВАНА ПОЛЬЗОВАТЕЛЕМ")
-                        break
-
-                    r_num = item["row"]
-                    fio = item["fio"]
-                    raw_dob = item["dob"]
-                    norm_dob = self.client._normalize_dob(raw_dob)
-                    curr_status = item.get("status", "")
-
-                    # 1. Защита от дублирования заявок: если ребенок уже был успешно добавлен ранее
-                    if item.get("is_processed"):
-                        stats["skip_already"] += 1
-                        self.log(f"[{r_num}] {fio} — ⏭️ ПРОПУЩЕНО: заявка уже обработана ранее ({curr_status})", "gray")
-                        write_to_log_file(
-                            f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
-                            f"          -> СТАТУС: [ПРОПУЩЕНО: УЖЕ ОБРАБОТАН] Флаг в Excel: '{curr_status}'\n"
-                        )
-                        continue
-
-                    # 2. Защита от инициалов / некорректного формата ФИО в Excel
-                    if not item.get("is_valid_format", True):
-                        fmt_err = item.get("format_error", "неправильный формат")
-                        stats["err"] += 1
-                        self.log(f"[{r_num}] {fio} — ⚠️ ПРОПУЩЕНО: {fmt_err} (укажите Фамилию и полное Имя)", "yellow")
-                        write_to_log_file(
-                            f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
-                            f"          -> СТАТУС: [ОШИБКА ФОРМАТА] {fmt_err} | В Excel отмечено: '{curr_status}'\n"
-                        )
-                        continue
-
-                    self.log(f"[{r_num}] {fio} (ДР: {raw_dob} -> {norm_dob or 'нет'})")
-
-                    kid, search_msg = self.client.find_kid(fio, norm_dob)
-                    if getattr(self, "stop_requested", False):
-                        break
-
-                    if not kid:
-                        if "is_approved" in search_msg.lower():
-                            reason = "НЕ ПОДТВЕРЖДЕН РОДИТЕЛЕМ ('is_approved': false)"
-                            self.log(f"   ✗ ПРОПУСК: Аккаунт ребенка НЕ подтвержден ('is_approved': false)", "yellow")
-                            stats["skip_unapproved"] += 1
-                        elif "тезок" in search_msg.lower() or "не совпала" in search_msg.lower():
-                            reason = "НЕ СОВПАЛА ДАТА РОЖДЕНИЯ (среди найденных тезок)"
-                            self.log(f"   ✗ ПРОПУСК: Не совпала дата рождения среди тезок", "yellow")
-                            stats["skip_dob"] += 1
-                        else:
-                            reason = f"НЕ НАЙДЕН В НАВИГАТОРЕ ({search_msg})"
-                            self.log(f"   ✗ ПРОПУСК: {search_msg}", "red")
-                            stats["skip_notfound"] += 1
-
-                        # Фиксируем отказ в results_log.txt
-                        write_to_log_file(
-                            f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
-                            f"          -> СТАТУС: [ПРОПУЩЕНО] Причина: {reason}\n"
-                        )
-                        continue
-
-                    # Ребенок найден и подтвержден
-                    ok, ord_msg, oid = self.client.create_order(act_id, event_dt, kid)
-                    if getattr(self, "stop_requested", False):
-                        break
-
-                    if ok:
-                        self.log(f"   ✓ УСПЕШНО: {ord_msg} (Kid ID: {kid.get('id')})", "green")
-                        stats["ok"] += 1
-
-                        # Автоматически переключаем флаг в 3-м столбце Excel, чтобы не допустить дублирования
-                        order_tag = f"Заявка #{oid}" if oid else "Заявка создана"
-                        excel_flag = f"Добавлен ({order_tag})"
-                        saved, save_msg = self.client.update_child_status(target_excel, r_num, excel_flag, item.get("status_col", 3))
-                        if saved:
-                            self.log(f"   💾 Статус в Excel сохранен: '{excel_flag}' (строка {r_num})", "cyan")
-                        else:
-                            self.log(f"   ⚠️ Не удалось обновить статус в Excel: {save_msg}", "yellow")
-
-                        # Фиксируем успех в results_log.txt
-                        write_to_log_file(
-                            f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
-                            f"          -> СТАТУС: [УСПЕШНО] Заявка #{oid or 'OK'} создана (Kid ID: {kid.get('id')}) | Excel: {excel_flag}\n"
-                        )
+                kid, search_msg = self.client.find_kid(fio, norm_dob)
+                if not kid:
+                    if "is_approved" in search_msg.lower():
+                        reason = "НЕ ПОДТВЕРЖДЕН РОДИТЕЛЕМ ('is_approved': false)"
+                        self.log(f"   ✗ ПРОПУСК: Аккаунт ребенка НЕ подтвержден ('is_approved': false)", "yellow")
+                        stats["skip_unapproved"] += 1
+                    elif "тезок" in search_msg.lower() or "не совпала" in search_msg.lower():
+                        reason = "НЕ СОВПАЛА ДАТА РОЖДЕНИЯ (среди найденных тезок)"
+                        self.log(f"   ✗ ПРОПУСК: Не совпала дата рождения среди тезок", "yellow")
+                        stats["skip_dob"] += 1
                     else:
-                        self.log(f"   ✗ ОШИБКА СОЗДАНИЯ ЗАЯВКИ: {ord_msg}", "red")
-                        stats["err"] += 1
-                        # Фиксируем ошибку отправки в results_log.txt
-                        write_to_log_file(
-                            f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
-                            f"          -> СТАТУС: [ОШИБКА] {ord_msg} (Kid ID: {kid.get('id')})\n"
-                        )
+                        reason = f"НЕ НАЙДЕН В НАВИГАТОРЕ ({search_msg})"
+                        self.log(f"   ✗ ПРОПУСК: {search_msg}", "red")
+                        stats["skip_notfound"] += 1
 
-                # Записываем итоги в results_log.txt
-                write_to_log_file("-" * 80)
-                write_to_log_file("ИТОГИ ПАКЕТНОЙ ЗАПИСИ:")
-                write_to_log_file(f"  Всего записей в таблице:    {len(records)}")
-                write_to_log_file(f"  Успешно создано заявок:     {stats['ok']}")
-                write_to_log_file(f"  Пропущено (ранее добавлены):{stats['skip_already']}")
-                write_to_log_file(f"  Пропущено (не подтвержден): {stats['skip_unapproved']}")
-                write_to_log_file(f"  Пропущено (ДР не совпала):  {stats['skip_dob']}")
-                write_to_log_file(f"  Пропущено (не найден):      {stats['skip_notfound']}")
-                write_to_log_file(f"  Ошибок отправки:            {stats['err']}")
-                write_to_log_file("=" * 80 + "\n\n")
+                    # Фиксируем отказ в results_log.txt
+                    write_to_log_file(
+                        f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
+                        f"          -> СТАТУС: [ПРОПУЩЕНО] Причина: {reason}\n"
+                    )
+                    continue
 
-                self.log("\n" + "-" * 50, "cyan")
-                self.log("ИТОГИ ПАКЕТНОЙ ЗАПИСИ:", "cyan")
-                self.log(f"Всего в таблице:            {len(records)}")
-                self.log(f"Успешно создано заявок:     {stats['ok']}", "green")
-                if stats["skip_already"]:
-                    self.log(f"Пропущено (ранее добавлены):{stats['skip_already']}", "cyan")
+                # Ребенок найден и подтвержден
+                ok, ord_msg, oid = self.client.create_order(act_id, event_dt, kid)
+                if ok:
+                    self.log(f"   ✓ УСПЕШНО: {ord_msg} (Kid ID: {kid.get('id')})", "green")
+                    stats["ok"] += 1
+
+                    # Автоматически переключаем флаг в 3-м столбце Excel, чтобы не допустить дублирования
+                    order_tag = f"Заявка #{oid}" if oid else "Заявка создана"
+                    excel_flag = f"Добавлен ({order_tag})"
+                    saved, save_msg = self.client.update_child_status(target_excel, r_num, excel_flag, item.get("status_col", 3))
+                    if saved:
+                        self.log(f"   💾 Статус в Excel сохранен: '{excel_flag}' (строка {r_num})", "cyan")
+                    else:
+                        self.log(f"   ⚠️ Не удалось обновить статус в Excel: {save_msg}", "yellow")
+
+                    # Фиксируем успех в results_log.txt
+                    write_to_log_file(
+                        f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
+                        f"          -> СТАТУС: [УСПЕШНО] Заявка #{oid or 'OK'} создана (Kid ID: {kid.get('id')}) | Excel: {excel_flag}\n"
+                    )
                 else:
-                    self.log(f"Пропущено (ранее добавлены):0")
-                self.log(f"Пропущено (не подтвержден): {stats['skip_unapproved']}", "yellow")
-                self.log(f"Пропущено (ДР не совпала):  {stats['skip_dob']}", "yellow")
-                self.log(f"Пропущено (не найден):      {stats['skip_notfound']}", "red")
-                self.log(f"Ошибок отправки:            {stats['err']}", "red" if stats["err"] else None)
-                self.log(f"📄 Подробный отчет сохранен в: {LOG_FILE}", "cyan")
-                self.log("-" * 50 + "\n", "cyan")
+                    self.log(f"   ✗ ОШИБКА СОЗДАНИЯ ЗАЯВКИ: {ord_msg}", "red")
+                    stats["err"] += 1
+                    # Фиксируем ошибку отправки в results_log.txt
+                    write_to_log_file(
+                        f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
+                        f"          -> СТАТУС: [ОШИБКА] {ord_msg} (Kid ID: {kid.get('id')})\n"
+                    )
 
-            except InterruptedError:
-                self.log("\n🛑 [СТОП] Пакетная запись немедленно прервана!", "red")
-            finally:
-                def _done():
-                    if getattr(self, "stop_requested", False):
-                        self.reset_to_initial_state()
-                        return
-                    self.set_task_running(False)
-                    self.btn_run_add.config(state=tk.NORMAL)
-                    if not getattr(self, "stop_requested", False):
-                        messagebox.showinfo(
-                            "Завершено",
-                            f"Обработка завершена!\n\n"
-                            f"✓ Успешно создано заявок: {stats['ok']}\n"
-                            f"⏭️ Пропущено (ранее добавлены): {stats['skip_already']}\n"
-                            f"✗ Пропущено других: {stats['skip_unapproved'] + stats['skip_dob'] + stats['skip_notfound']}\n"
-                            f"❗ Ошибок: {stats['err']}"
-                        )
-                self.root.after(0, _done)
+                # Частота запросов адаптивно регулируется AdaptiveRateLimiter (строго <= 1 запр/сек)
+
+            # Записываем итоги в results_log.txt
+            write_to_log_file("-" * 80)
+            write_to_log_file("ИТОГИ ПАКЕТНОЙ ЗАПИСИ:")
+            write_to_log_file(f"  Всего записей в таблице:    {len(records)}")
+            write_to_log_file(f"  Успешно создано заявок:     {stats['ok']}")
+            write_to_log_file(f"  Пропущено (ранее добавлены):{stats['skip_already']}")
+            write_to_log_file(f"  Пропущено (не подтвержден): {stats['skip_unapproved']}")
+            write_to_log_file(f"  Пропущено (ДР не совпала):  {stats['skip_dob']}")
+            write_to_log_file(f"  Пропущено (не найден):      {stats['skip_notfound']}")
+            write_to_log_file(f"  Ошибок отправки:            {stats['err']}")
+            write_to_log_file("=" * 80 + "\n\n")
+
+            self.log("\n" + "-" * 50, "cyan")
+            self.log("ИТОГИ ПАКЕТНОЙ ЗАПИСИ:", "cyan")
+            self.log(f"Всего в таблице:            {len(records)}")
+            self.log(f"Успешно создано заявок:     {stats['ok']}", "green")
+            if stats["skip_already"]:
+                self.log(f"Пропущено (ранее добавлены):{stats['skip_already']}", "cyan")
+            else:
+                self.log(f"Пропущено (ранее добавлены):0")
+            self.log(f"Пропущено (не подтвержден): {stats['skip_unapproved']}", "yellow")
+            self.log(f"Пропущено (ДР не совпала):  {stats['skip_dob']}", "yellow")
+            self.log(f"Пропущено (не найден):      {stats['skip_notfound']}", "red")
+            self.log(f"Ошибок отправки:            {stats['err']}", "red" if stats["err"] else None)
+            self.log(f"📄 Подробный отчет сохранен в: {LOG_FILE}", "cyan")
+            self.log("-" * 50 + "\n", "cyan")
+
+            self.root.after(0, lambda: self.btn_run_add.config(state=tk.NORMAL))
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Завершено",
+                f"Обработка завершена!\n\n"
+                f"✓ Успешно создано заявок: {stats['ok']}\n"
+                f"⏭️ Пропущено (ранее добавлены): {stats['skip_already']}\n"
+                f"✗ Пропущено других: {stats['skip_unapproved'] + stats['skip_dob'] + stats['skip_notfound']}\n"
+                f"❗ Ошибок: {stats['err']}"
+            ))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3091,7 +2242,6 @@ class NavigatorApp:
             messagebox.showwarning("Внимание", "Введите название мероприятия для проверки.")
             return
 
-        add_to_field_history("activity_name", event_name)
         update_config(activity_name=event_name)
         self.saved_cfg = load_config()
 
@@ -3126,7 +2276,6 @@ class NavigatorApp:
             messagebox.showwarning("Внимание", "Введите название мероприятия для проверки.")
             return
 
-        add_to_field_history("activity_name", event_name)
         update_config(confirm_activity_name=event_name)
         self.saved_cfg = load_config()
 
@@ -3229,7 +2378,6 @@ class NavigatorApp:
         ):
             return
 
-        self.set_task_running(True, "Подтверждение заявок мероприятия")
         self.btn_run_confirm.config(state=tk.DISABLED)
         self.btn_run_participant.config(state=tk.DISABLED)
         self.log("\n[СТАРТ] Массовое подтверждение заявок (state -> approve)...", "cyan")
@@ -3237,61 +2385,41 @@ class NavigatorApp:
         def worker():
             total_approved = 0
             total_err = 0
-            try:
-                while True:
-                    if getattr(self, "stop_requested", False):
-                        self.log("\n🛑 [СТОП] Подтверждение заявок прервано пользователем!", "red")
-                        break
+            while True:
+                batch, remaining = self.client.get_pending_orders(act_id, limit=100)
+                if not batch:
+                    break
+                for o in batch:
+                    oid = o["id"]
+                    child_fio = o.get("child_fio") or o.get("child_name") or ""
+                    name_str = f" ({child_fio})" if child_fio else ""
+                    ok, ord_msg = self.client.approve_order(oid)
+                    if ok:
+                        total_approved += 1
+                        self.log(f"  ✓ Заявка #{oid}{name_str}: подтверждена (state -> approve)", "green")
+                    else:
+                        total_err += 1
+                        self.log(f"  ✗ Заявка #{oid}{name_str}: ошибка подтверждения ({ord_msg})", "red")
 
-                    batch, remaining = self.client.get_pending_orders(act_id, limit=100)
-                    if getattr(self, "stop_requested", False):
-                        break
-                    if not batch:
-                        break
-                    for o in batch:
-                        if getattr(self, "stop_requested", False):
-                            self.log("\n🛑 [СТОП] Подтверждение заявок прервано пользователем!", "red")
-                            break
-                        oid = o["id"]
-                        child_fio = o.get("child_fio") or o.get("child_name") or ""
-                        name_str = f" ({child_fio})" if child_fio else ""
-                        ok, ord_msg = self.client.approve_order(oid)
-                        if getattr(self, "stop_requested", False):
-                            break
-                        if ok:
-                            total_approved += 1
-                            self.log(f"  ✓ Заявка #{oid}{name_str}: подтверждена (state -> approve)", "green")
-                        else:
-                            total_err += 1
-                            self.log(f"  ✗ Заявка #{oid}{name_str}: ошибка подтверждения ({ord_msg})", "red")
+            self.log(f"\n[ГОТОВО] Всего успешно подтверждено: {total_approved} заявок!", "green")
+            if total_err > 0:
+                self.log(f"Ошибок подтверждения: {total_err}", "red")
 
-                self.log(f"\n[ГОТОВО] Всего успешно подтверждено: {total_approved} заявок!", "green")
-                if total_err > 0:
-                    self.log(f"Ошибок подтверждения: {total_err}", "red")
-
-                write_to_log_file(
-                    "=" * 80 + "\n"
-                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] МАССОВОЕ ПОДТВЕРЖДЕНИЕ ЗАЯВОК (APPROVE)\n"
-                    f"Мероприятие ID: {act_id}\n"
-                    f"Успешно подтверждено заявок: {total_approved}\n"
-                    f"Ошибок: {total_err}\n"
-                    + "=" * 80 + "\n\n"
-                )
-            except InterruptedError:
-                self.log("\n🛑 [СТОП] Подтверждение заявок немедленно прервано!", "red")
-            finally:
-                def _done():
-                    if getattr(self, "stop_requested", False):
-                        self.reset_to_initial_state()
-                        return
-                    self.set_task_running(False)
-                    messagebox.showinfo(
-                        "Подтверждение завершено",
-                        f"Успешно подтверждено заявок: {total_approved}!\n\n"
-                        "Теперь эти заявки можно отметить как участников (кнопка «🎖️ 2. Отметить участие»)."
-                    )
-                    self.check_pending_orders(silent=True)
-                self.root.after(0, _done)
+            write_to_log_file(
+                "=" * 80 + "\n"
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] МАССОВОЕ ПОДТВЕРЖДЕНИЕ ЗАЯВОК (APPROVE)\n"
+                f"Мероприятие ID: {act_id}\n"
+                f"Успешно подтверждено заявок: {total_approved}\n"
+                f"Ошибок: {total_err}\n"
+                + "=" * 80 + "\n\n"
+            )
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Подтверждение завершено",
+                f"Успешно подтверждено заявок: {total_approved}!\n\n"
+                "Теперь эти заявки можно отметить как участников (кнопка «🎖️ 2. Отметить участие»)."
+            ))
+            # Автоматически обновляем статус и доступность кнопок
+            self.check_pending_orders(silent=True)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3312,7 +2440,6 @@ class NavigatorApp:
         ):
             return
 
-        self.set_task_running(True, "Отметка участия в мероприятии")
         self.btn_run_confirm.config(state=tk.DISABLED)
         self.btn_run_participant.config(state=tk.DISABLED)
         self.log("\n[СТАРТ] Массовая отметка участия детей (state -> participant)...", "cyan")
@@ -3320,61 +2447,41 @@ class NavigatorApp:
         def worker():
             total_participant = 0
             total_err = 0
-            try:
-                while True:
-                    if getattr(self, "stop_requested", False):
-                        self.log("\n🛑 [СТОП] Отметка участия прервана пользователем!", "red")
-                        break
+            while True:
+                batch, remaining = self.client.get_approved_orders(act_id, limit=100)
+                if not batch:
+                    break
+                for o in batch:
+                    oid = o["id"]
+                    child_fio = o.get("child_fio") or o.get("child_name") or ""
+                    name_str = f" ({child_fio})" if child_fio else ""
+                    ok, ord_msg = self.client.mark_participant_order(oid)
+                    if ok:
+                        total_participant += 1
+                        self.log(f"  ✓ Заявка #{oid}{name_str}: участие успешно отмечено (state -> participant)", "green")
+                    else:
+                        total_err += 1
+                        self.log(f"  ✗ Заявка #{oid}{name_str}: ошибка отметки участия ({ord_msg})", "red")
 
-                    batch, remaining = self.client.get_approved_orders(act_id, limit=100)
-                    if getattr(self, "stop_requested", False):
-                        break
-                    if not batch:
-                        break
-                    for o in batch:
-                        if getattr(self, "stop_requested", False):
-                            self.log("\n🛑 [СТОП] Отметка участия прервана пользователем!", "red")
-                            break
-                        oid = o["id"]
-                        child_fio = o.get("child_fio") or o.get("child_name") or ""
-                        name_str = f" ({child_fio})" if child_fio else ""
-                        ok, ord_msg = self.client.mark_participant_order(oid)
-                        if getattr(self, "stop_requested", False):
-                            break
-                        if ok:
-                            total_participant += 1
-                            self.log(f"  ✓ Заявка #{oid}{name_str}: участие успешно отмечено (state -> participant)", "green")
-                        else:
-                            total_err += 1
-                            self.log(f"  ✗ Заявка #{oid}{name_str}: ошибка отметки участия ({ord_msg})", "red")
+            self.log(f"\n[ГОТОВО] Всего успешно отмечено участие для {total_participant} заявок!", "green")
+            if total_err > 0:
+                self.log(f"Ошибок: {total_err}", "red")
 
-                self.log(f"\n[ГОТОВО] Всего успешно отмечено участие для {total_participant} заявок!", "green")
-                if total_err > 0:
-                    self.log(f"Ошибок: {total_err}", "red")
-
-                write_to_log_file(
-                    "=" * 80 + "\n"
-                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] МАССОВАЯ ОТМЕТКА УЧАСТИЯ (PARTICIPANT)\n"
-                    f"Мероприятие ID: {act_id}\n"
-                    f"Успешно отмечено участие: {total_participant} заявок\n"
-                    f"Ошибок: {total_err}\n"
-                    + "=" * 80 + "\n\n"
-                )
-            except InterruptedError:
-                self.log("\n🛑 [СТОП] Отметка участия немедленно прервана!", "red")
-            finally:
-                def _done():
-                    if getattr(self, "stop_requested", False):
-                        self.reset_to_initial_state()
-                        return
-                    self.set_task_running(False)
-                    messagebox.showinfo(
-                        "Отметка участия завершена",
-                        f"Успешно отмечено участие для {total_participant} заявок!\n"
-                        "(state -> participant)"
-                    )
-                    self.check_pending_orders(silent=True)
-                self.root.after(0, _done)
+            write_to_log_file(
+                "=" * 80 + "\n"
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] МАССОВАЯ ОТМЕТКА УЧАСТИЯ (PARTICIPANT)\n"
+                f"Мероприятие ID: {act_id}\n"
+                f"Успешно отмечено участие: {total_participant} заявок\n"
+                f"Ошибок: {total_err}\n"
+                + "=" * 80 + "\n\n"
+            )
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Отметка участия завершена",
+                f"Успешно отмечено участие для {total_participant} заявок!\n"
+                "(state -> participant)"
+            ))
+            # Автоматически обновляем статус и доступность кнопок
+            self.check_pending_orders(silent=True)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3385,7 +2492,6 @@ class NavigatorApp:
             messagebox.showwarning("Внимание", "Введите название программы для проверки.")
             return
 
-        add_to_field_history("program_name", prog_name)
         update_config(program_name=prog_name)
         self.saved_cfg = load_config()
 
@@ -3425,7 +2531,6 @@ class NavigatorApp:
             messagebox.showwarning("Внимание", "Введите название или ID группы для проверки.")
             return
 
-        add_to_field_history("program_group_name", group_val)
         prog_name = self.entry_prog_name.get().strip() if hasattr(self, "entry_prog_name") else ""
         self.log(f"\n[ПРОВЕРКА] Проверка группы: '{group_val}'...", "cyan")
 
@@ -3533,239 +2638,194 @@ class NavigatorApp:
         )
         self.saved_cfg = load_config()
 
-        self.set_task_running(True, "Зачисление на программу")
         self.btn_run_program.config(state=tk.DISABLED)
         self.log("\n" + "=" * 60, "cyan")
         self.log(f"[СТАРТ] Поиск программы: '{prog_name}'...", "cyan")
 
         def worker():
+            # Шаг 1: Ищем программу по названию в Навигаторе (GET /api/rest/events)
+            prog, search_msg = self.client.search_program(prog_name)
+            if not prog:
+                self.log(f"✗ Программа не найдена: {search_msg}", "red")
+                self.root.after(0, lambda: self.btn_run_program.config(state=tk.NORMAL))
+                return
+
+            event_id = str(prog["id"])
+            full_prog_name = prog.get("name", prog_name)
+            self.log(f"✓ Найдена программа: '{full_prog_name}' (ID: {event_id})", "green")
+
+            # Шаг 2: Проверяем, что группа принадлежит этой программе (GET /api/rest/eventGroups?extFilters=...)
+            self.log(f"[ПРОВЕРКА] Проверка принадлежности группы '{group_input}' к программе '{full_prog_name}' (ID: {event_id})...", "cyan")
+            group_obj, available_groups, group_msg = self.client.validate_group_for_program(group_input, event_id, program_name=full_prog_name)
+            if not group_obj:
+                self.log(f"✗ ОШИБКА ПРИНАДЛЕЖНОСТИ: {group_msg}", "red")
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Группа не принадлежит программе",
+                    group_msg
+                ))
+                self.root.after(0, lambda: self.btn_run_program.config(state=tk.NORMAL))
+                return
+
+            group_id = str(group_obj["id"])
+            group_display_name = group_obj.get("name", group_input)
+            teacher_name = group_obj.get("teacher", "н/д")
+            self.log(f"✓ Группа подтверждена для программы: '{group_display_name}' (ID: {group_id}, педагог: {teacher_name})", "green")
+            self.log(f"Параметры: ID Программы={event_id}, ID Группы={group_id}, Год={academic_year_id} (введено '{raw_year}'), Сертификат={create_cert}")
+
             try:
-                if getattr(self, "stop_requested", False):
-                    return
+                records = self.client.read_excel(target_excel)
+            except Exception as e:
+                self.log(f"✗ Ошибка чтения Excel ({os.path.basename(target_excel)}): {e}", "red")
+                self.root.after(0, lambda: self.btn_run_program.config(state=tk.NORMAL))
+                return
 
-                # Шаг 1: Ищем программу по названию в Навигаторе (GET /api/rest/events)
-                prog, search_msg = self.client.search_program(prog_name)
-                if getattr(self, "stop_requested", False):
-                    return
-                if not prog:
-                    self.log(f"✗ Программа не найдена: {search_msg}", "red")
-                    self.root.after(0, lambda: self.btn_run_program.config(state=tk.NORMAL))
-                    self.root.after(0, lambda: self.set_task_running(False))
-                    return
+            self.log(f"Загружено записей из таблицы ({os.path.basename(target_excel)}): {len(records)}\n", "cyan")
 
-                event_id = str(prog["id"])
-                full_prog_name = prog.get("name", prog_name)
-                self.log(f"✓ Найдена программа: '{full_prog_name}' (ID: {event_id})", "green")
+            start_time_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            write_to_log_file("=" * 80)
+            write_to_log_file(f"[{start_time_str}] ЗАЧИСЛЕНИЕ НА УЧЕБНУЮ ПРОГРАММУ (/api/rest/order)")
+            write_to_log_file(f"Программа:                  {full_prog_name} (ID: {event_id})")
+            write_to_log_file(f"Группа:                     {group_display_name} (ID: {group_id}, педагог: {teacher_name})")
+            write_to_log_file(f"Учебный год (academic_year_id): {academic_year_id} (введено: '{raw_year}')")
+            write_to_log_file(f"Создавать сертификат:       {create_cert}")
+            write_to_log_file(f"Использовать сертификат:    {use_cert}")
+            write_to_log_file(f"Файл таблицы:               {os.path.abspath(target_excel)} (строк: {len(records)})")
+            write_to_log_file("-" * 80)
 
-                # Шаг 2: Проверяем, что группа принадлежит этой программе (GET /api/rest/eventGroups?extFilters=...)
-                self.log(f"[ПРОВЕРКА] Проверка принадлежности группы '{group_input}' к программе '{full_prog_name}' (ID: {event_id})...", "cyan")
-                group_obj, available_groups, group_msg = self.client.validate_group_for_program(group_input, event_id, program_name=full_prog_name)
-                if getattr(self, "stop_requested", False):
-                    return
-                if not group_obj:
-                    self.log(f"✗ ОШИБКА ПРИНАДЛЕЖНОСТИ: {group_msg}", "red")
-                    self.root.after(0, lambda: messagebox.showerror(
-                        "Группа не принадлежит программе",
-                        group_msg
-                    ))
-                    self.root.after(0, lambda: self.btn_run_program.config(state=tk.NORMAL))
-                    self.root.after(0, lambda: self.set_task_running(False))
-                    return
+            stats = {"ok": 0, "skip_already_excel": 0, "skip_already_api": 0, "skip_unapproved": 0, "skip_dob": 0, "skip_notfound": 0, "err": 0}
 
-                group_id = str(group_obj["id"])
-                group_display_name = group_obj.get("name", group_input)
-                teacher_name = group_obj.get("teacher", "н/д")
-                self.log(f"✓ Группа подтверждена для программы: '{group_display_name}' (ID: {group_id}, педагог: {teacher_name})", "green")
-                self.log(f"Параметры: ID Программы={event_id}, ID Группы={group_id}, Год={academic_year_id} (введено '{raw_year}'), Сертификат={create_cert}")
+            for item in records:
+                r_num = item["row"]
+                fio = item["fio"]
+                raw_dob = item["dob"]
+                norm_dob = self.client._normalize_dob(raw_dob)
+                curr_status = item.get("status", "")
 
-                try:
-                    records = self.client.read_excel(target_excel)
-                except Exception as e:
-                    self.log(f"✗ Ошибка чтения Excel ({os.path.basename(target_excel)}): {e}", "red")
-                    self.root.after(0, lambda: self.btn_run_program.config(state=tk.NORMAL))
-                    self.root.after(0, lambda: self.set_task_running(False))
-                    return
-
-                self.log(f"Загружено записей из таблицы ({os.path.basename(target_excel)}): {len(records)}\n", "cyan")
-
-                start_time_str = time.strftime("%Y-%m-%d %H:%M:%S")
-                write_to_log_file("=" * 80)
-                write_to_log_file(f"[{start_time_str}] ЗАЧИСЛЕНИЕ НА УЧЕБНУЮ ПРОГРАММУ (/api/rest/order)")
-                write_to_log_file(f"Программа:                  {full_prog_name} (ID: {event_id})")
-                write_to_log_file(f"Группа:                     {group_display_name} (ID: {group_id}, педагог: {teacher_name})")
-                write_to_log_file(f"Учебный год (academic_year_id): {academic_year_id} (введено: '{raw_year}')")
-                write_to_log_file(f"Создавать сертификат:       {create_cert}")
-                write_to_log_file(f"Использовать сертификат:    {use_cert}")
-                write_to_log_file(f"Файл таблицы:               {os.path.abspath(target_excel)} (строк: {len(records)})")
-                write_to_log_file("-" * 80)
-
-                stats = {"ok": 0, "skip_already_excel": 0, "skip_already_api": 0, "skip_unapproved": 0, "skip_dob": 0, "skip_notfound": 0, "err": 0}
-
-                for item in records:
-                    if getattr(self, "stop_requested", False):
-                        self.log("\n🛑 [СТОП] Зачисление на программу прервано пользователем!", "red")
-                        write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🛑 ЗАЧИСЛЕНИЕ ПРЕРВАНО ПОЛЬЗОВАТЕЛЕМ")
-                        break
-
-                    r_num = item["row"]
-                    fio = item["fio"]
-                    raw_dob = item["dob"]
-                    norm_dob = self.client._normalize_dob(raw_dob)
-                    curr_status = item.get("status", "")
-
-                    # 1. Защита от повторного зачисления: если ребенок уже отмечен как обработанный в Excel
-                    if item.get("is_processed"):
-                        stats["skip_already_excel"] += 1
-                        self.log(f"[{r_num}] {fio} — ⏭️ ПРОПУЩЕНО: заявка уже обработана в таблице ({curr_status})", "gray")
-                        write_to_log_file(
-                            f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
-                            f"          -> СТАТУС: [ПРОПУЩЕНО: УЖЕ В ТАБЛИЦЕ] Флаг в Excel: '{curr_status}'\n"
-                        )
-                        continue
-
-                    # 2. Защита от инициалов / некорректного формата ФИО в Excel
-                    if not item.get("is_valid_format", True):
-                        fmt_err = item.get("format_error", "неправильный формат")
-                        stats["err"] += 1
-                        self.log(f"[{r_num}] {fio} — ⚠️ ПРОПУЩЕНО: {fmt_err} (укажите Фамилию и полное Имя)", "yellow")
-                        write_to_log_file(
-                            f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
-                            f"          -> СТАТУС: [ОШИБКА ФОРМАТА] {fmt_err} | В Excel отмечено: '{curr_status}'\n"
-                        )
-                        continue
-
-                    self.log(f"[{r_num}] {fio} (ДР: {raw_dob} -> {norm_dob or 'нет'})")
-
-                    kid, search_msg = self.client.find_kid(fio, norm_dob)
-                    if getattr(self, "stop_requested", False):
-                        break
-
-                    if not kid:
-                        if "is_approved" in search_msg.lower():
-                            reason = "НЕ ПОДТВЕРЖДЕН РОДИТЕЛЕМ ('is_approved': false)"
-                            self.log(f"   ✗ ПРОПУСК: Аккаунт ребенка НЕ подтвержден ('is_approved': false)", "yellow")
-                            stats["skip_unapproved"] += 1
-                        elif "тезок" in search_msg.lower() or "не совпала" in search_msg.lower():
-                            reason = "НЕ СОВПАЛА ДАТА РОЖДЕНИЯ (среди найденных тезок)"
-                            self.log(f"   ✗ ПРОПУСК: Не совпала дата рождения среди тезок", "yellow")
-                            stats["skip_dob"] += 1
-                        else:
-                            reason = f"НЕ НАЙДЕН В НАВИГАТОРЕ ({search_msg})"
-                            self.log(f"   ✗ ПРОПУСК: {search_msg}", "red")
-                            stats["skip_notfound"] += 1
-
-                        write_to_log_file(
-                            f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
-                            f"          -> СТАТУС: [ПРОПУЩЕНО] Причина: {reason}\n"
-                        )
-                        continue
-
-                    # Шаг 3: Защита от дубликатов: проверка через Навигатор (GET /api/rest/order)
-                    # Проверяем, не подана ли уже заявка со статусом initial, approve или study
-                    has_existing, exist_order, check_msg = self.client.check_existing_program_order(kid.get("id"), event_id)
-                    if getattr(self, "stop_requested", False):
-                        break
-
-                    if has_existing:
-                        oid = exist_order.get("id") if exist_order else "н/д"
-                        st = exist_order.get("state", exist_order.get("state_grid", "активна")) if exist_order else "активна"
-                        stats["skip_already_api"] += 1
-                        self.log(f"   ⏭️ ПРОПУСК: Заявка уже зарегистрирована в Навигаторе (#{oid}, статус: '{st}')", "cyan")
-
-                        # Фиксируем актуальный статус в programm_list.xlsx, чтобы исключить повторные запросы
-                        excel_flag = f"Уже зачислен (Заявка #{oid})"
-                        self.client.update_child_status(target_excel, r_num, excel_flag, item.get("status_col", 3))
-
-                        write_to_log_file(
-                            f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
-                            f"          -> СТАТУС: [ПРОПУЩЕНО: ДУБЛИКАТ В НАВИГАТОРЕ] Заявка #{oid} уже есть со статусом '{st}' (Kid ID: {kid.get('id')}) | Excel: {excel_flag}\n"
-                        )
-                        continue
-
-                    # Ребенок найден, подтвержден и не имеет дублирующей заявки -> создание заявки на зачисление
-                    ok, ord_msg, oid = self.client.create_program_order(
-                        event_id=event_id,
-                        group_id=group_id,
-                        academic_year_id=academic_year_id,
-                        kid=kid,
-                        use_certificate=use_cert,
-                        create_certificate=create_cert
+                # 1. Защита от повторного зачисления: если ребенок уже отмечен как обработанный в Excel
+                if item.get("is_processed"):
+                    stats["skip_already_excel"] += 1
+                    self.log(f"[{r_num}] {fio} — ⏭️ ПРОПУЩЕНО: заявка уже обработана в таблице ({curr_status})", "gray")
+                    write_to_log_file(
+                        f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
+                        f"          -> СТАТУС: [ПРОПУЩЕНО: УЖЕ В ТАБЛИЦЕ] Флаг в Excel: '{curr_status}'\n"
                     )
-                    if getattr(self, "stop_requested", False):
-                        break
+                    continue
 
-                    if ok:
-                        self.log(f"   ✓ УСПЕШНО: {ord_msg} (Kid ID: {kid.get('id')}, Parent: {kid.get('site_user_id')})", "green")
-                        stats["ok"] += 1
+                self.log(f"[{r_num}] {fio} (ДР: {raw_dob} -> {norm_dob or 'нет'})")
 
-                        # Сохраняем отметку в programm_list.xlsx в 3-й столбец
-                        order_tag = f"Заявка #{oid}" if oid else "Заявка создана"
-                        excel_flag = f"Зачислен ({order_tag})"
-                        saved, save_msg = self.client.update_child_status(target_excel, r_num, excel_flag, item.get("status_col", 3))
-                        if saved:
-                            self.log(f"   💾 Статус в Excel сохранен: '{excel_flag}' (строка {r_num})", "cyan")
-                        else:
-                            self.log(f"   ⚠️ Не удалось обновить статус в Excel: {save_msg}", "yellow")
-
-                        write_to_log_file(
-                            f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
-                            f"          -> СТАТУС: [УСПЕШНО] Заявка #{oid or 'OK'} создана (Kid ID: {kid.get('id')}, Parent: {kid.get('site_user_id')}) | Excel: {excel_flag}\n"
-                        )
+                kid, search_msg = self.client.find_kid(fio, norm_dob)
+                if not kid:
+                    if "is_approved" in search_msg.lower():
+                        reason = "НЕ ПОДТВЕРЖДЕН РОДИТЕЛЕМ ('is_approved': false)"
+                        self.log(f"   ✗ ПРОПУСК: Аккаунт ребенка НЕ подтвержден ('is_approved': false)", "yellow")
+                        stats["skip_unapproved"] += 1
+                    elif "тезок" in search_msg.lower() or "не совпала" in search_msg.lower():
+                        reason = "НЕ СОВПАЛА ДАТА РОЖДЕНИЯ (среди найденных тезок)"
+                        self.log(f"   ✗ ПРОПУСК: Не совпала дата рождения среди тезок", "yellow")
+                        stats["skip_dob"] += 1
                     else:
-                        self.log(f"   ✗ ОШИБКА СОЗДАНИЯ ЗАЯВКИ: {ord_msg}", "red")
-                        stats["err"] += 1
-                        write_to_log_file(
-                            f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
-                            f"          -> СТАТУС: [ОШИБКА] {ord_msg} (Kid ID: {kid.get('id')})\n"
-                        )
+                        reason = f"НЕ НАЙДЕН В НАВИГАТОРЕ ({search_msg})"
+                        self.log(f"   ✗ ПРОПУСК: {search_msg}", "red")
+                        stats["skip_notfound"] += 1
 
-                # Записываем итоги в results_log.txt
-                total_skipped_already = stats["skip_already_excel"] + stats["skip_already_api"]
-                write_to_log_file("-" * 80)
-                write_to_log_file("ИТОГИ ЗАЧИСЛЕНИЯ НА ПРОГРАММУ:")
-                write_to_log_file(f"  Всего записей в таблице:         {len(records)}")
-                write_to_log_file(f"  Успешно создано новых заявок:    {stats['ok']}")
-                write_to_log_file(f"  Пропущено (были отмечены в Excel):{stats['skip_already_excel']}")
-                write_to_log_file(f"  Пропущено (найдены в Навигаторе): {stats['skip_already_api']}")
-                write_to_log_file(f"  Пропущено (не подтвержден):      {stats['skip_unapproved']}")
-                write_to_log_file(f"  Пропущено (ДР не совпала):       {stats['skip_dob']}")
-                write_to_log_file(f"  Пропущено (не найден):           {stats['skip_notfound']}")
-                write_to_log_file(f"  Ошибок отправки:                 {stats['err']}")
-                write_to_log_file("=" * 80 + "\n\n")
-
-                self.log("\n" + "-" * 50, "cyan")
-                self.log("ИТОГИ ЗАЧИСЛЕНИЯ НА ПРОГРАММУ:", "cyan")
-                self.log(f"Всего в таблице:                 {len(records)}")
-                self.log(f"Успешно создано новых заявок:    {stats['ok']}", "green")
-                if stats["skip_already_excel"]:
-                    self.log(f"Пропущено (отмечены в Excel):    {stats['skip_already_excel']}", "cyan")
-                if stats["skip_already_api"]:
-                    self.log(f"Пропущено (дубликат в Навигаторе): {stats['skip_already_api']}", "cyan")
-                self.log(f"Пропущено (не подтвержден):      {stats['skip_unapproved']}", "yellow")
-                self.log(f"Пропущено (ДР не совпала):       {stats['skip_dob']}", "yellow")
-                self.log(f"Пропущено (не найден):           {stats['skip_notfound']}", "red")
-                self.log(f"Ошибок отправки:                 {stats['err']}", "red" if stats["err"] else None)
-                self.log(f"📄 Подробный отчет сохранен в: {LOG_FILE}", "cyan")
-                self.log("-" * 50 + "\n", "cyan")
-
-            except InterruptedError:
-                self.log("\n🛑 [СТОП] Зачисление на программу немедленно прервано!", "red")
-            finally:
-                def _done():
-                    if getattr(self, "stop_requested", False):
-                        self.reset_to_initial_state()
-                        return
-                    self.set_task_running(False)
-                    self.btn_run_program.config(state=tk.NORMAL)
-                    messagebox.showinfo(
-                        "Зачисление завершено",
-                        f"Обработка зачисления на программу завершена!\n\n"
-                        f"✓ Успешно создано новых заявок: {stats['ok']}\n"
-                        f"⏭️ Пропущено дубликатов: {total_skipped_already} (в Excel: {stats['skip_already_excel']}, в Навигаторе: {stats['skip_already_api']})\n"
-                        f"✗ Пропущено других: {stats['skip_unapproved'] + stats['skip_dob'] + stats['skip_notfound']}\n"
-                        f"❗ Ошибок: {stats['err']}"
+                    write_to_log_file(
+                        f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
+                        f"          -> СТАТУС: [ПРОПУЩЕНО] Причина: {reason}\n"
                     )
-                self.root.after(0, _done)
+                    continue
+
+                # Шаг 3: Защита от дубликатов: проверка через Навигатор (GET /api/rest/order)
+                # Проверяем, не подана ли уже заявка со статусом initial, approve или study
+                has_existing, exist_order, check_msg = self.client.check_existing_program_order(kid.get("id"), event_id)
+                if has_existing:
+                    oid = exist_order.get("id") if exist_order else "н/д"
+                    st = exist_order.get("state", exist_order.get("state_grid", "активна")) if exist_order else "активна"
+                    stats["skip_already_api"] += 1
+                    self.log(f"   ⏭️ ПРОПУСК: Заявка уже зарегистрирована в Навигаторе (#{oid}, статус: '{st}')", "cyan")
+
+                    # Фиксируем актуальный статус в programm_list.xlsx, чтобы исключить повторные запросы
+                    excel_flag = f"Уже зачислен (Заявка #{oid})"
+                    self.client.update_child_status(target_excel, r_num, excel_flag, item.get("status_col", 3))
+
+                    write_to_log_file(
+                        f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
+                        f"          -> СТАТУС: [ПРОПУЩЕНО: ДУБЛИКАТ В НАВИГАТОРЕ] Заявка #{oid} уже есть со статусом '{st}' (Kid ID: {kid.get('id')}) | Excel: {excel_flag}\n"
+                    )
+                    continue
+
+                # Ребенок найден, подтвержден и не имеет дублирующей заявки -> создание заявки на зачисление
+                ok, ord_msg, oid = self.client.create_program_order(
+                    event_id=event_id,
+                    group_id=group_id,
+                    academic_year_id=academic_year_id,
+                    kid=kid,
+                    use_certificate=use_cert,
+                    create_certificate=create_cert
+                )
+
+                if ok:
+                    self.log(f"   ✓ УСПЕШНО: {ord_msg} (Kid ID: {kid.get('id')}, Parent: {kid.get('site_user_id')})", "green")
+                    stats["ok"] += 1
+
+                    # Сохраняем отметку в programm_list.xlsx в 3-й столбец
+                    order_tag = f"Заявка #{oid}" if oid else "Заявка создана"
+                    excel_flag = f"Зачислен ({order_tag})"
+                    saved, save_msg = self.client.update_child_status(target_excel, r_num, excel_flag, item.get("status_col", 3))
+                    if saved:
+                        self.log(f"   💾 Статус в Excel сохранен: '{excel_flag}' (строка {r_num})", "cyan")
+                    else:
+                        self.log(f"   ⚠️ Не удалось обновить статус в Excel: {save_msg}", "yellow")
+
+                    write_to_log_file(
+                        f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
+                        f"          -> СТАТУС: [УСПЕШНО] Заявка #{oid or 'OK'} создана (Kid ID: {kid.get('id')}, Parent: {kid.get('site_user_id')}) | Excel: {excel_flag}\n"
+                    )
+                else:
+                    self.log(f"   ✗ ОШИБКА СОЗДАНИЯ ЗАЯВКИ: {ord_msg}", "red")
+                    stats["err"] += 1
+                    write_to_log_file(
+                        f"Строка {r_num:02d} | {fio:<35} | ДР: {raw_dob} -> {norm_dob or 'н/д'}\n"
+                        f"          -> СТАТУС: [ОШИБКА] {ord_msg} (Kid ID: {kid.get('id')})\n"
+                    )
+
+            # Записываем итоги в results_log.txt
+            total_skipped_already = stats["skip_already_excel"] + stats["skip_already_api"]
+            write_to_log_file("-" * 80)
+            write_to_log_file("ИТОГИ ЗАЧИСЛЕНИЯ НА ПРОГРАММУ:")
+            write_to_log_file(f"  Всего записей в таблице:         {len(records)}")
+            write_to_log_file(f"  Успешно создано новых заявок:    {stats['ok']}")
+            write_to_log_file(f"  Пропущено (были отмечены в Excel):{stats['skip_already_excel']}")
+            write_to_log_file(f"  Пропущено (найдены в Навигаторе): {stats['skip_already_api']}")
+            write_to_log_file(f"  Пропущено (не подтвержден):      {stats['skip_unapproved']}")
+            write_to_log_file(f"  Пропущено (ДР не совпала):       {stats['skip_dob']}")
+            write_to_log_file(f"  Пропущено (не найден):           {stats['skip_notfound']}")
+            write_to_log_file(f"  Ошибок отправки:                 {stats['err']}")
+            write_to_log_file("=" * 80 + "\n\n")
+
+            self.log("\n" + "-" * 50, "cyan")
+            self.log("ИТОГИ ЗАЧИСЛЕНИЯ НА ПРОГРАММУ:", "cyan")
+            self.log(f"Всего в таблице:                 {len(records)}")
+            self.log(f"Успешно создано новых заявок:    {stats['ok']}", "green")
+            if stats["skip_already_excel"]:
+                self.log(f"Пропущено (отмечены в Excel):    {stats['skip_already_excel']}", "cyan")
+            if stats["skip_already_api"]:
+                self.log(f"Пропущено (дубликат в Навигаторе): {stats['skip_already_api']}", "cyan")
+            self.log(f"Пропущено (не подтвержден):      {stats['skip_unapproved']}", "yellow")
+            self.log(f"Пропущено (ДР не совпала):       {stats['skip_dob']}", "yellow")
+            self.log(f"Пропущено (не найден):           {stats['skip_notfound']}", "red")
+            self.log(f"Ошибок отправки:                 {stats['err']}", "red" if stats["err"] else None)
+            self.log(f"📄 Подробный отчет сохранен в: {LOG_FILE}", "cyan")
+            self.log("-" * 50 + "\n", "cyan")
+
+            self.root.after(0, lambda: self.btn_run_program.config(state=tk.NORMAL))
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Зачисление завершено",
+                f"Обработка зачисления на программу завершена!\n\n"
+                f"✓ Успешно создано новых заявок: {stats['ok']}\n"
+                f"⏭️ Пропущено дубликатов: {total_skipped_already} (в Excel: {stats['skip_already_excel']}, в Навигаторе: {stats['skip_already_api']})\n"
+                f"✗ Пропущено других: {stats['skip_unapproved'] + stats['skip_dob'] + stats['skip_notfound']}\n"
+                f"❗ Ошибок: {stats['err']}"
+            ))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3776,7 +2836,6 @@ class NavigatorApp:
             messagebox.showwarning("Внимание", "Введите название программы для проверки.")
             return
 
-        add_to_field_history("program_name", prog_name)
         update_config(study_program_name=prog_name)
         self.saved_cfg = load_config()
 
@@ -3823,7 +2882,6 @@ class NavigatorApp:
             self.log("💡 Поле группы пустое: поиск заявок будет выполняться по ВСЕМ группам программы.", "cyan")
             return
 
-        add_to_field_history("program_group_name", group_val)
         self.log(f"\n[ПРОВЕРКА] Проверка группы: '{group_val}'...", "cyan")
 
         def worker():
@@ -3875,45 +2933,10 @@ class NavigatorApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def reload_study_excel_info(self):
-        """Перечитывает отдельную таблицу study_list.xlsx и выводит информацию о детях, флагах и формате ФИО."""
-        try:
-            records = self.client.read_study_excel(STUDY_EXCEL_FILE)
-            cnt = len(records)
-            conf_cnt = sum(1 for r in records if r.get("is_confirmed"))
-            enr_cnt = sum(1 for r in records if r.get("is_enrolled"))
-            invalid_kids = [r for r in records if not r.get("is_valid_format", True)]
-
-            msg = f"Таблица study_list.xlsx: {cnt} детей (подтверждено: {conf_cnt}, зачислено: {enr_cnt})."
-            if invalid_kids:
-                msg += f" ⚠️ Ошибок формата (инициалы): {len(invalid_kids)}!"
-
-            if hasattr(self, "lbl_study_excel_status") and self.lbl_study_excel_status:
-                self.lbl_study_excel_status.config(
-                    text=msg,
-                    foreground="#dc2626" if invalid_kids else ("#059669" if cnt else "#d97706")
-                )
-            self.log(f"📑 [ТАБЛИЦА] {msg}", "yellow" if invalid_kids else "cyan")
-
-            if invalid_kids:
-                self.log("⚠️ ВНИМАНИЕ: В таблице study_list.xlsx найдены записи с инициалами вместо полного имени:", "yellow")
-                self.log("   (Сайт Навигатора выдает Фамилию и Имя — записи с инициалами отмечены как неправильный формат в файле):", "yellow")
-                for r in invalid_kids:
-                    self.log(f"   • Строка {r['row']}: '{r['fio']}' ➜ {r.get('format_error')} (отмечено в файле)", "yellow")
-        except Exception as e:
-            if hasattr(self, "lbl_study_excel_status") and self.lbl_study_excel_status:
-                self.lbl_study_excel_status.config(text=f"Ошибка чтения study_list.xlsx: {e}", foreground="#dc2626")
-            self.log(f"⚠️ Ошибка чтения study_list.xlsx: {e}", "red")
-
     def check_study_program_orders(self, silent: bool = False):
         """
         Запрашивает из Навигатора детей по названию программы и (опционально) группе:
         GET /api/rest/order?extFilters=[fact_academic_year_id, event_id, fact_group_id]
-        Сверяет список детей по Фамилии и Имени с отдельной таблицей study_list.xlsx:
-          - Сайт выдает Фамилию и Имя.
-          - В Excel может быть Фамилия Имя Отчество (отчество игнорируется при сверке).
-          - Если в Excel указаны Фамилия и инициалы, они отмечаются как неправильный формат.
-        Защищает от ошибочных заявок родителей на другую программу.
         Подсчитывает и разделяет заявки:
           - initial -> ожидают подтверждения (/api/approveRequest)
           - approve -> ожидают отметки об обучении (/api/studyRequest)
@@ -3981,47 +3004,15 @@ class NavigatorApp:
                 self.root.after(0, lambda: self.btn_check_study_orders.config(state=tk.NORMAL))
                 return
 
-            # 4. Сверка списка детей с таблицей study_list.xlsx по Фамилии и Имени
-            verify_active = getattr(self, "var_study_verify_excel", None) and self.var_study_verify_excel.get()
-            study_records = []
-            invalid_kids = []
-            if verify_active:
-                try:
-                    study_records = self.client.read_study_excel(STUDY_EXCEL_FILE)
-                    invalid_kids = [r for r in study_records if not r.get("is_valid_format", True)]
-                except Exception as e:
-                    self.log(f"⚠️ Ошибка чтения study_list.xlsx: {e}", "yellow")
-
-            # Сопоставляем каждую заявку с сервером по Фамилии и Имени
-            for o in orders:
-                kid_last = (o.get("kid_last_name") or "").strip()
-                kid_first = (o.get("kid_first_name") or "").strip()
-                kid_patr = (o.get("kid_patronymic") or o.get("kid_middle_name") or "").strip()
-                server_fio = f"{kid_last} {kid_first} {kid_patr}".strip() or o.get("site_user_fio", "Ребенок")
-                o["server_fio"] = server_fio
-
-                matched_excel_item = None
-                if verify_active and study_records:
-                    # Ищем совпадение по Фамилии и Имени только среди записей без ошибок формата
-                    matched_excel_item = next((r for r in study_records if r.get("is_valid_format", True) and match_fio(o, r["fio"])), None)
-
-                o["excel_item"] = matched_excel_item
-                o["is_in_excel"] = (matched_excel_item is not None) if verify_active else True
-
-            # 5. Классификация заявок по статусам и сверке
+            # 4. Классификация по статусам
             orders_initial = []
             orders_approve = []
             orders_study = []
-            orders_mismatch = []
             orders_other = []
 
             for o in orders:
                 st = str(o.get("state") or o.get("state_grid") or "").lower().strip()
-                o["state_clean"] = st
-
-                if verify_active and not o.get("is_in_excel"):
-                    orders_mismatch.append(o)
-                elif st == "initial":
+                if st == "initial":
                     orders_initial.append(o)
                 elif st == "approve":
                     orders_approve.append(o)
@@ -4030,35 +3021,15 @@ class NavigatorApp:
                 else:
                     orders_other.append(o)
 
-            # Дети из таблицы study_list.xlsx, по которым еще нет заявок на сайте
-            matched_excel_rows = {o["excel_item"]["row"] for o in orders if o.get("excel_item")}
-            unmatched_excel_kids = [r for r in study_records if r["row"] not in matched_excel_rows] if verify_active else []
-
             self.cached_study_orders = orders
             self.study_orders_initial = orders_initial
             self.study_orders_approve = orders_approve
             self.study_orders_study = orders_study
-            self.study_orders_mismatch = orders_mismatch
-            self.study_excel_records = study_records
 
             self.log(f"✓ Заявки программы '{real_prog_name}' (ID: {event_id}) успешно загружены:", "green")
             self.log(f"   • Фильтр по группе: {group_label}", "cyan")
             self.log(f"   • Учебный год: {year_id}", "cyan")
-            self.log(f"   • Всего найдено заявок на сервере: {len(orders)}", "cyan")
-
-            if verify_active:
-                self.log(f"   • 📑 Сверка со study_list.xlsx ({len(study_records)} детей в файле):", "cyan")
-                self.log(f"      ✓ Сравнение по Фамилии и Имени (отчество в Excel игнорируется): {len(orders) - len(orders_mismatch)} из {len(orders)} совпало", "green")
-                if invalid_kids:
-                    self.log(f"      ⚠️ ВНИМАНИЕ: {len(invalid_kids)} записей в Excel содержат инициалы вместо полного имени!", "yellow")
-                    for ik in invalid_kids:
-                        self.log(f"         • Строка {ik['row']}: '{ik['fio']}' — {ik.get('format_error')} (отмечено в файле study_list.xlsx)", "yellow")
-                if orders_mismatch:
-                    self.log(f"      ⚠️ ВНИМАНИЕ: Найдено {len(orders_mismatch)} заявок на сервере, которых НЕТ в таблице study_list.xlsx!", "yellow")
-                    self.log(f"         (Родители могли ошибочно выбрать эту программу на сайте вместо указанной в заявлении)", "yellow")
-                if unmatched_excel_kids:
-                    self.log(f"      ⏳ ВНИМАНИЕ: {len(unmatched_excel_kids)} детей из таблицы study_list.xlsx еще НЕ подали заявку на сайте", "cyan")
-
+            self.log(f"   • Всего найдено заявок: {len(orders)}", "cyan")
             self.log(f"   • ⏳ Неподтвержденные (initial) — готовы к подтверждению: {len(orders_initial)}", "yellow" if orders_initial else "gray")
             self.log(f"   • 📋 Подтвержденные (approve) — готовы к зачислению на обучение: {len(orders_approve)}", "cyan" if orders_approve else "gray")
             self.log(f"   • 🎓 Обучаются (study) — уже зачислены приказом: {len(orders_study)}", "green" if orders_study else "gray")
@@ -4071,78 +3042,33 @@ class NavigatorApp:
                 for idx, o in enumerate(orders, 1):
                     oid = o.get("id")
                     st = o.get("state") or o.get("state_grid") or "?"
-                    fio = o.get("server_fio", "Ребенок")
+                    fio = f"{o.get('kid_last_name', '')} {o.get('kid_first_name', '')}".strip() or o.get("site_user_fio", "Ребенок")
                     dob_raw = o.get("kid_birthday") or ""
                     dob_str = dob_raw.split(" ")[0] if " " in str(dob_raw) else str(dob_raw)
                     gid = o.get("fact_group_id") or o.get("group_id") or "-"
                     
-                    badge = ""
-                    if verify_active:
-                        if o.get("is_in_excel"):
-                            ex_row = o["excel_item"]["row"]
-                            curr_flag = o["excel_item"]["flag"] or "флаг пуст"
-                            ex_fio = o["excel_item"]["fio"]
-                            badge = f" | ✓ Excel (стр.{ex_row}: '{ex_fio}')"
-                        else:
-                            badge = " | ⚠️ НЕТ В EXCEL (чужая заявка)"
-
                     color = "yellow" if st == "initial" else ("cyan" if st == "approve" else ("green" if st == "study" else None))
-                    if verify_active and not o.get("is_in_excel"):
-                        color = "yellow"
-
-                    self.log(f"  [{idx:02d}] Заявка #{oid:<8} | {fio:<30} | ДР: {dob_str:<10} | Группа: {gid}{badge} | Статус: '{st}'", color)
-
-            # Если есть дети из Excel, которых еще нет на сайте
-            if verify_active and unmatched_excel_kids:
-                self.log("\n📑 Дети из таблицы study_list.xlsx, по которым еще нет заявки на сервере:", "cyan")
-                for k in unmatched_excel_kids:
-                    fl_info = f", флаг: '{k['flag']}'" if k["flag"] else ""
-                    if not k.get("is_valid_format", True):
-                        self.log(f"  • {k['fio']} (строка {k['row']}) — ⚠️ НЕПРАВИЛЬНЫЙ ФОРМАТ (инициалы)! Заявка не сопоставится, пока не укажете полное имя", "yellow")
-                    else:
-                        self.log(f"  • {k['fio']} (строка {k['row']}{fl_info})", "cyan")
+                    self.log(f"  [{idx:02d}] Заявка #{oid:<8} | {fio:<30} | ДР: {dob_str:<10} | Группа: {gid} | Статус: '{st}'", color)
 
             def ui_update():
                 self.btn_check_study_orders.config(state=tk.NORMAL)
                 
-                # Обновляем статусную строку таблицы в интерфейсе
-                if hasattr(self, "lbl_study_excel_status") and self.lbl_study_excel_status and verify_active:
-                    status_txt = f"Таблица study_list.xlsx: {len(study_records)} детей. На сайте: совпало {len(orders) - len(orders_mismatch)}, чужих: {len(orders_mismatch)}."
-                    if invalid_kids:
-                        status_txt += f" ⚠️ Ошибок формата (инициалы): {len(invalid_kids)}!"
-                    self.lbl_study_excel_status.config(
-                        text=status_txt,
-                        foreground="#dc2626" if invalid_kids else ("#059669" if not orders_mismatch else "#d97706")
-                    )
-
                 # Кнопка подтверждения (initial -> approve)
                 if len(orders_initial) > 0:
-                    lbl = f"✓ 1. Подтвердить {len(orders_initial)} заявок"
-                    if verify_active:
-                        lbl += " из Excel"
-                    lbl += " (initial)"
-                    self.btn_run_study_approve.config(state=tk.NORMAL, text=lbl)
+                    self.btn_run_study_approve.config(state=tk.NORMAL, text=f"✓ 1. Подтвердить {len(orders_initial)} заявок (initial)")
                 else:
                     self.btn_run_study_approve.config(state=tk.DISABLED, text="✓ 1. Нет заявок initial")
 
                 # Кнопка отметки об обучении (approve -> study)
                 if len(orders_approve) > 0:
-                    lbl = f"🎓 2. Зачислить на обучение {len(orders_approve)} заявок"
-                    if verify_active:
-                        lbl += " из Excel"
-                    lbl += " (approve)"
-                    self.btn_run_study_mark.config(state=tk.NORMAL, text=lbl)
+                    self.btn_run_study_mark.config(state=tk.NORMAL, text=f"🎓 2. Зачислить на обучение {len(orders_approve)} заявок (approve)")
                 else:
                     self.btn_run_study_mark.config(state=tk.DISABLED, text="🎓 2. Нет заявок approve")
 
                 # Кнопка оба шага
                 total_to_process = len(orders_initial) + len(orders_approve)
                 if total_to_process > 0:
-                    lbl = f"⚡ 3. Зачислить всё ({total_to_process} заявок"
-                    if verify_active:
-                        lbl += " из Excel"
-                    lbl += ")"
-                    self.btn_run_study_all.config(state=tk.NORMAL, text=lbl)
+                    self.btn_run_study_all.config(state=tk.NORMAL, text=f"⚡ 3. Зачислить всё ({total_to_process} заявок)")
                 else:
                     self.btn_run_study_all.config(state=tk.DISABLED, text="⚡ 3. Все заявки обработаны")
 
@@ -4151,19 +3077,7 @@ class NavigatorApp:
                         f"Программа: {real_prog_name} (ID: {event_id})\n"
                         f"Группа: {group_label}\n"
                         f"Учебный год: {year_id}\n\n"
-                        f"Всего заявок на сервере: {len(orders)}\n"
-                    )
-                    if verify_active:
-                        msg_text += (
-                            f"📑 Сверка со study_list.xlsx:\n"
-                            f"  • Совпало со списком в Excel (Фамилия и Имя): {len(orders) - len(orders_mismatch)}\n"
-                            f"  • Чужих заявок (нет в Excel): {len(orders_mismatch)}\n"
-                            f"  • Еще не подали заявку из Excel: {len(unmatched_excel_kids)}\n"
-                        )
-                        if invalid_kids:
-                            msg_text += f"  • ⚠️ Неправильный формат ФИО в Excel (инициалы): {len(invalid_kids)} (отмечено в файле)\n"
-                        msg_text += "\n"
-                    msg_text += (
+                        f"Всего заявок найдено: {len(orders)}\n"
                         f"• Готовы к подтверждению (initial): {len(orders_initial)}\n"
                         f"• Готовы к зачислению на обучение (approve): {len(orders_approve)}\n"
                         f"• Уже обучаются (study): {len(orders_study)}\n"
@@ -4179,8 +3093,7 @@ class NavigatorApp:
     def run_study_batch_approve(self):
         """
         Массовое подтверждение заявок на программу (state: initial -> approve)
-        через POST /api/approveRequest с проверкой по отдельной таблице study_list.xlsx
-        и автоматическим переключением флага зачисления.
+        через POST /api/approveRequest.
         """
         if not hasattr(self, "study_orders_initial") or not self.study_orders_initial:
             messagebox.showinfo("Информация", "Нет заявок в статусе 'initial' для подтверждения.")
@@ -4188,102 +3101,56 @@ class NavigatorApp:
 
         cnt = len(self.study_orders_initial)
         pname = getattr(self, "current_study_prog_name", "программе")
-        verify_active = getattr(self, "var_study_verify_excel", None) and self.var_study_verify_excel.get()
-        verify_note = "\n(Будет выполнена сверка со study_list.xlsx, чужие заявки будут пропущены)" if verify_active else ""
-
         if not messagebox.askyesno(
             "Подтверждение заявок",
             f"Вы действительно хотите подтвердить {cnt} заявок (state: initial ➜ approve)\n"
-            f"по программе '{pname}' через POST /api/approveRequest?{verify_note}"
+            f"по программе '{pname}' через POST /api/approveRequest?"
         ):
             return
 
-        self.set_task_running(True, "Подтверждение заявок программы")
         self.btn_run_study_approve.config(state=tk.DISABLED)
         self.btn_run_study_mark.config(state=tk.DISABLED)
         self.btn_run_study_all.config(state=tk.DISABLED)
 
         self.log(f"\n[СТАРТ] Подтверждение {cnt} заявок (initial ➜ approve)...", "cyan")
-        if verify_active:
-            self.log("📑 Защита активна: подтверждаются только дети из таблицы study_list.xlsx", "cyan")
 
         def worker():
             total_ok = 0
             total_err = 0
-            total_skipped = 0
-            try:
-                for idx, o in enumerate(self.study_orders_initial, 1):
-                    if getattr(self, "stop_requested", False):
-                        self.log("\n🛑 [СТОП] Подтверждение заявок программы прервано пользователем!", "red")
-                        break
-                    oid = o.get("id")
-                    fio = o.get("server_fio") or f"{o.get('kid_last_name', '')} {o.get('kid_first_name', '')}".strip() or o.get("site_user_fio", "Ребенок")
+            for idx, o in enumerate(self.study_orders_initial, 1):
+                oid = o.get("id")
+                fio = f"{o.get('kid_last_name', '')} {o.get('kid_first_name', '')}".strip() or o.get("site_user_fio", "Ребенок")
+                ok, msg = self.client.approve_program_order(oid)
+                if ok:
+                    total_ok += 1
+                    self.log(f"  [{idx}/{cnt}] ✓ Заявка #{oid} ({fio}): подтверждена (approve)", "green")
+                    write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ПОДТВЕРЖДЕНИЕ ПРОГРАММЫ | Заявка #{oid} ({fio}) -> УСПЕШНО (approve)")
+                else:
+                    total_err += 1
+                    self.log(f"  [{idx}/{cnt}] ✗ Заявка #{oid} ({fio}): ошибка подтверждения ({msg})", "red")
+                    write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ПОДТВЕРЖДЕНИЕ ПРОГРАММЫ | Заявка #{oid} ({fio}) -> ОШИБКА: {msg}")
 
-                    # Проверка по Excel таблице
-                    if verify_active and not o.get("is_in_excel"):
-                        total_skipped += 1
-                        self.log(f"  [{idx}/{cnt}] ⏭️ [ПРОПУСК: ЧУЖАЯ ЗАЯВКА] #{oid} ({fio}): нет в таблице study_list.xlsx (ошибочная заявка родителей)", "yellow")
-                        continue
+            self.log(f"\n[ГОТОВО] Завершено подтверждение заявок:", "cyan")
+            self.log(f"  • Успешно подтверждено: {total_ok}", "green")
+            if total_err:
+                self.log(f"  • Ошибок: {total_err}", "red")
 
-                    ok, msg = self.client.approve_program_order(oid)
-                    if getattr(self, "stop_requested", False):
-                        break
-                    if ok:
-                        total_ok += 1
-                        self.log(f"  [{idx}/{cnt}] ✓ Заявка #{oid} ({fio}): подтверждена (approve)", "green")
-                        write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ПОДТВЕРЖДЕНИЕ ПРОГРАММЫ | Заявка #{oid} ({fio}) -> УСПЕШНО (approve)")
+            write_to_log_file(
+                "=" * 80 + "\n"
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ИТОГИ ПОДТВЕРЖДЕНИЯ ПРОГРАММЫ (APPROVE)\n"
+                f"Программа: {getattr(self, 'current_study_prog_name', '-')}\n"
+                f"Успешно подтверждено: {total_ok}\n"
+                f"Ошибок: {total_err}\n"
+                + "=" * 80 + "\n\n"
+            )
 
-                        # Переключаем флаг в отдельной таблице study_list.xlsx
-                        if o.get("excel_item"):
-                            ex_row = o["excel_item"]["row"]
-                            ex_col = o["excel_item"].get("flag_col", 2)
-                            flag_txt = f"Подтвержден (#{oid})"
-                            ok_fl, fl_msg = self.client.update_study_child_flag(STUDY_EXCEL_FILE, ex_row, flag_txt, ex_col)
-                            if ok_fl:
-                                self.log(f"      💾 В study_list.xlsx переключен флаг: '{flag_txt}' (строка {ex_row})", "cyan")
-                                o["excel_item"]["flag"] = flag_txt
-                                o["excel_item"]["is_confirmed"] = True
-                            else:
-                                self.log(f"      ⚠️ Запись флага в study_list.xlsx: {fl_msg}", "yellow")
-                    else:
-                        total_err += 1
-                        self.log(f"  [{idx}/{cnt}] ✗ Заявка #{oid} ({fio}): ошибка подтверждения ({msg})", "red")
-                        write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ПОДТВЕРЖДЕНИЕ ПРОГРАММЫ | Заявка #{oid} ({fio}) -> ОШИБКА: {msg}")
-
-                self.log(f"\n[ГОТОВО] Завершено подтверждение заявок:", "cyan")
-                self.log(f"  • Успешно подтверждено: {total_ok}", "green")
-                if total_skipped:
-                    self.log(f"  • Пропущено чужих заявок (нет в Excel): {total_skipped}", "yellow")
-                if total_err:
-                    self.log(f"  • Ошибок: {total_err}", "red")
-
-                write_to_log_file(
-                    "=" * 80 + "\n"
-                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ИТОГИ ПОДТВЕРЖДЕНИЯ ПРОГРАММЫ (APPROVE)\n"
-                    f"Программа: {getattr(self, 'current_study_prog_name', '-')}\n"
-                    f"Успешно подтверждено: {total_ok}\n"
-                    f"Пропущено чужих заявок: {total_skipped}\n"
-                    f"Ошибок: {total_err}\n"
-                    + "=" * 80 + "\n\n"
-                )
-            except InterruptedError:
-                self.log("\n🛑 [СТОП] Подтверждение заявок программы немедленно прервано!", "red")
-            finally:
-                def _done():
-                    if getattr(self, "stop_requested", False):
-                        self.reset_to_initial_state()
-                        return
-                    self.set_task_running(False)
-                    skip_info = f"\nПропущено чужих заявок (нет в Excel): {total_skipped}" if total_skipped else ""
-                    messagebox.showinfo(
-                        "Подтверждение завершено",
-                        f"Успешно подтверждено: {total_ok} из {cnt} заявок!\n"
-                        f"{skip_info}\n"
-                        f"Флаги в таблице study_list.xlsx обновлены.\n"
-                        f"Теперь эти заявки можно зачислить на обучение приказом (кнопка «🎓 2. Отметка об обучении»)."
-                    )
-                    self.check_study_program_orders(silent=True)
-                self.root.after(0, _done)
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Подтверждение завершено",
+                f"Успешно подтверждено: {total_ok} из {cnt} заявок!\n\n"
+                f"Теперь эти заявки можно зачислить на обучение приказом (кнопка «🎓 2. Отметка об обучении»)."
+            ))
+            # Автоматически обновляем данные с сервера
+            self.check_study_program_orders(silent=True)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -4291,7 +3158,6 @@ class NavigatorApp:
         """
         Массовая отметка об обучении (state: approve -> study)
         через POST /api/studyRequest с указанием номера приказа и дат.
-        Сверяет детей со study_list.xlsx и обновляет флаг зачисления.
         """
         if not hasattr(self, "study_orders_approve") or not self.study_orders_approve:
             messagebox.showinfo("Информация", "Нет заявок в статусе 'approve' для зачисления на обучение.")
@@ -4306,7 +3172,6 @@ class NavigatorApp:
         date_signing = normalize_date_input(raw_signing, "2026-08-31")
         date_start = normalize_date_input(raw_start, "2026-09-01")
         fin_src = self.saved_cfg.get("study_financing_source", "1")
-        verify_active = getattr(self, "var_study_verify_excel", None) and self.var_study_verify_excel.get()
 
         if not messagebox.askyesno(
             "Зачисление на обучение",
@@ -4315,109 +3180,66 @@ class NavigatorApp:
             f"№ приказа: {decree_num}\n"
             f"Дата приказа: {date_signing}\n"
             f"Дата начала обучения: {date_start}\n"
-            f"Источник финансирования: {fin_src}\n"
-            f"Сверка со study_list.xlsx: {'ВКЛЮЧЕНА' if verify_active else 'ВЫКЛЮЧЕНА'}\n\n"
+            f"Источник финансирования: {fin_src}\n\n"
             f"Запрос: POST /api/studyRequest"
         ):
             return
 
-        self.set_task_running(True, "Зачисление на обучение (study)")
         self.btn_run_study_approve.config(state=tk.DISABLED)
         self.btn_run_study_mark.config(state=tk.DISABLED)
         self.btn_run_study_all.config(state=tk.DISABLED)
 
         self.log(f"\n[СТАРТ] Зачисление {cnt} заявок на обучение (approve ➜ study, приказ №{decree_num})...", "cyan")
-        if verify_active:
-            self.log("📑 Защита активна: зачисляются только дети из таблицы study_list.xlsx", "cyan")
 
         def worker():
             total_ok = 0
             total_err = 0
-            total_skipped = 0
-            try:
-                for idx, o in enumerate(self.study_orders_approve, 1):
-                    if getattr(self, "stop_requested", False):
-                        self.log("\n🛑 [СТОП] Зачисление на обучение прервано пользователем!", "red")
-                        break
-                    oid = o.get("id")
-                    fio = o.get("server_fio") or f"{o.get('kid_last_name', '')} {o.get('kid_first_name', '')}".strip() or o.get("site_user_fio", "Ребенок")
+            for idx, o in enumerate(self.study_orders_approve, 1):
+                oid = o.get("id")
+                fio = f"{o.get('kid_last_name', '')} {o.get('kid_first_name', '')}".strip() or o.get("site_user_fio", "Ребенок")
+                
+                # Если у заявки есть свой доступный источник финансирования, берем его
+                avail_fin = o.get("available_financing_source")
+                current_fin = str(avail_fin[0]) if (isinstance(avail_fin, list) and avail_fin) else fin_src
 
-                    # Проверка по Excel таблице
-                    if verify_active and not o.get("is_in_excel"):
-                        total_skipped += 1
-                        self.log(f"  [{idx}/{cnt}] ⏭️ [ПРОПУСК: ЧУЖАЯ ЗАЯВКА] #{oid} ({fio}): нет в таблице study_list.xlsx", "yellow")
-                        continue
-
-                    # Если у заявки есть свой доступный источник финансирования, берем его
-                    avail_fin = o.get("available_financing_source")
-                    current_fin = str(avail_fin[0]) if (isinstance(avail_fin, list) and avail_fin) else fin_src
-
-                    ok, msg = self.client.study_program_order(
-                        order_id=oid,
-                        financing_source=current_fin,
-                        date_start=date_start,
-                        decree_number=decree_num,
-                        date_signing=date_signing
-                    )
-                    if getattr(self, "stop_requested", False):
-                        break
-                    if ok:
-                        total_ok += 1
-                        self.log(f"  [{idx}/{cnt}] ✓ Заявка #{oid} ({fio}): зачислена на обучение (study)", "green")
-                        write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ОБУЧЕНИЕ ПРОГРАММЫ | Заявка #{oid} ({fio}) -> УСПЕШНО (study, приказ №{decree_num})")
-
-                        # Переключаем флаг зачисления в отдельной таблице study_list.xlsx
-                        if o.get("excel_item"):
-                            ex_row = o["excel_item"]["row"]
-                            ex_col = o["excel_item"].get("flag_col", 2)
-                            flag_txt = f"Зачислен (приказ №{decree_num} от {date_signing})"
-                            ok_fl, fl_msg = self.client.update_study_child_flag(STUDY_EXCEL_FILE, ex_row, flag_txt, ex_col)
-                            if ok_fl:
-                                self.log(f"      💾 В study_list.xlsx переключен флаг: '{flag_txt}' (строка {ex_row})", "cyan")
-                                o["excel_item"]["flag"] = flag_txt
-                                o["excel_item"]["is_enrolled"] = True
-                            else:
-                                self.log(f"      ⚠️ Запись флага в study_list.xlsx: {fl_msg}", "yellow")
-                    else:
-                        total_err += 1
-                        self.log(f"  [{idx}/{cnt}] ✗ Заявка #{oid} ({fio}): ошибка зачисления ({msg})", "red")
-                        write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ОБУЧЕНИЕ ПРОГРАММЫ | Заявка #{oid} ({fio}) -> ОШИБКА: {msg}")
-
-                self.log(f"\n[ГОТОВО] Завершено зачисление на обучение:", "cyan")
-                self.log(f"  • Успешно зачислено (study): {total_ok}", "green")
-                if total_skipped:
-                    self.log(f"  • Пропущено чужих заявок (нет в Excel): {total_skipped}", "yellow")
-                if total_err:
-                    self.log(f"  • Ошибок: {total_err}", "red")
-
-                write_to_log_file(
-                    "=" * 80 + "\n"
-                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ИТОГИ ЗАЧИСЛЕНИЯ НА ОБУЧЕНИЕ (STUDY)\n"
-                    f"Программа: {getattr(self, 'current_study_prog_name', '-')}\n"
-                    f"Приказ №: {decree_num} от {date_signing} (начало: {date_start})\n"
-                    f"Успешно зачислено: {total_ok}\n"
-                    f"Пропущено чужих заявок: {total_skipped}\n"
-                    f"Ошибок: {total_err}\n"
-                    + "=" * 80 + "\n\n"
+                ok, msg = self.client.study_program_order(
+                    order_id=oid,
+                    financing_source=current_fin,
+                    date_start=date_start,
+                    decree_number=decree_num,
+                    date_signing=date_signing
                 )
-            except InterruptedError:
-                self.log("\n🛑 [СТОП] Зачисление на обучение немедленно прервано!", "red")
-            finally:
-                def _done():
-                    if getattr(self, "stop_requested", False):
-                        self.reset_to_initial_state()
-                        return
-                    self.set_task_running(False)
-                    skip_info = f"\nПропущено чужих заявок: {total_skipped}" if total_skipped else ""
-                    messagebox.showinfo(
-                        "Зачисление на обучение завершено",
-                        f"Успешно зачислено на обучение: {total_ok} из {cnt} заявок!\n"
-                        f"{skip_info}\n"
-                        f"Статус: study (обучение по приказу №{decree_num}).\n"
-                        f"Флаги в study_list.xlsx обновлены."
-                    )
-                    self.check_study_program_orders(silent=True)
-                self.root.after(0, _done)
+                if ok:
+                    total_ok += 1
+                    self.log(f"  [{idx}/{cnt}] ✓ Заявка #{oid} ({fio}): зачислена на обучение (study)", "green")
+                    write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ОБУЧЕНИЕ ПРОГРАММЫ | Заявка #{oid} ({fio}) -> УСПЕШНО (study, приказ №{decree_num})")
+                else:
+                    total_err += 1
+                    self.log(f"  [{idx}/{cnt}] ✗ Заявка #{oid} ({fio}): ошибка зачисления ({msg})", "red")
+                    write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ОБУЧЕНИЕ ПРОГРАММЫ | Заявка #{oid} ({fio}) -> ОШИБКА: {msg}")
+
+            self.log(f"\n[ГОТОВО] Завершено зачисление на обучение:", "cyan")
+            self.log(f"  • Успешно зачислено (study): {total_ok}", "green")
+            if total_err:
+                self.log(f"  • Ошибок: {total_err}", "red")
+
+            write_to_log_file(
+                "=" * 80 + "\n"
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ИТОГИ ЗАЧИСЛЕНИЯ НА ОБУЧЕНИЕ (STUDY)\n"
+                f"Программа: {getattr(self, 'current_study_prog_name', '-')}\n"
+                f"Приказ №: {decree_num} от {date_signing} (начало: {date_start})\n"
+                f"Успешно зачислено: {total_ok}\n"
+                f"Ошибок: {total_err}\n"
+                + "=" * 80 + "\n\n"
+            )
+
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Зачисление на обучение завершено",
+                f"Успешно зачислено на обучение: {total_ok} из {cnt} заявок!\n"
+                f"Статус: study (обучение по приказу №{decree_num})"
+            ))
+            # Автоматически обновляем данные с сервера
+            self.check_study_program_orders(silent=True)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -4426,7 +3248,6 @@ class NavigatorApp:
         Выполняет оба шага подряд:
         1. Подтверждает все initial заявки (initial -> approve)
         2. Зачисляет все approve заявки на обучение (approve -> study)
-        Сверяет детей со study_list.xlsx и обновляет флаги зачисления на каждом этапе.
         """
         initial_list = getattr(self, "study_orders_initial", [])
         approve_list = getattr(self, "study_orders_approve", [])
@@ -4442,14 +3263,12 @@ class NavigatorApp:
         date_signing = normalize_date_input(raw_signing, "2026-08-31")
         date_start = normalize_date_input(raw_start, "2026-09-01")
         fin_src = self.saved_cfg.get("study_financing_source", "1")
-        verify_active = getattr(self, "var_study_verify_excel", None) and self.var_study_verify_excel.get()
 
         if not messagebox.askyesno(
             "Полное зачисление (оба шага)",
             f"Будет выполнено:\n"
             f"1. Подтверждение заявок initial ➜ approve ({len(initial_list)} шт)\n"
             f"2. Зачисление на обучение approve ➜ study ({len(approve_list)} шт + вновь подтвержденные)\n\n"
-            f"Сверка со study_list.xlsx: {'ВКЛЮЧЕНА' if verify_active else 'ВЫКЛЮЧЕНА'}\n"
             f"№ приказа: {decree_num}\n"
             f"Дата приказа: {date_signing}\n"
             f"Дата начала: {date_start}\n\n"
@@ -4457,130 +3276,63 @@ class NavigatorApp:
         ):
             return
 
-        self.set_task_running(True, "Полный цикл зачисления (approve + study)")
         self.btn_run_study_approve.config(state=tk.DISABLED)
         self.btn_run_study_mark.config(state=tk.DISABLED)
         self.btn_run_study_all.config(state=tk.DISABLED)
 
         self.log(f"\n[СТАРТ] Полный цикл зачисления: Шаг 1 (Подтверждение) + Шаг 2 (Обучение)...", "cyan")
-        if verify_active:
-            self.log("📑 Защита активна: зачисляются только дети из таблицы study_list.xlsx", "cyan")
 
         def worker():
-            try:
-                # ШАГ 1: Подтверждение initial
-                approved_orders_ready = list(approve_list)
-                if initial_list:
-                    self.log(f"\n--- ШАГ 1: Подтверждение {len(initial_list)} заявок (initial -> approve) ---", "cyan")
-                    for idx, o in enumerate(initial_list, 1):
-                        if getattr(self, "stop_requested", False):
-                            self.log("\n🛑 [СТОП] Полный цикл прерван пользователем!", "red")
-                            break
-                        oid = o.get("id")
-                        fio = o.get("server_fio") or f"{o.get('kid_last_name', '')} {o.get('kid_first_name', '')}".strip() or o.get("site_user_fio", "Ребенок")
+            # ШАГ 1: Подтверждение initial
+            approved_orders_ready = list(approve_list)
+            if initial_list:
+                self.log(f"\n--- ШАГ 1: Подтверждение {len(initial_list)} заявок (initial -> approve) ---", "cyan")
+                for idx, o in enumerate(initial_list, 1):
+                    oid = o.get("id")
+                    fio = f"{o.get('kid_last_name', '')} {o.get('kid_first_name', '')}".strip() or o.get("site_user_fio", "Ребенок")
+                    ok, msg = self.client.approve_program_order(oid)
+                    if ok:
+                        self.log(f"  [1.{idx}] ✓ Заявка #{oid} ({fio}): подтверждена", "green")
+                        approved_orders_ready.append(o)
+                    else:
+                        self.log(f"  [1.{idx}] ✗ Заявка #{oid} ({fio}): ошибка подтверждения ({msg})", "red")
 
-                        if verify_active and not o.get("is_in_excel"):
-                            self.log(f"  [1.{idx}] ⏭️ [ПРОПУСК: ЧУЖАЯ ЗАЯВКА] #{oid} ({fio}): нет в таблице study_list.xlsx", "yellow")
-                            continue
-
-                        ok, msg = self.client.approve_program_order(oid)
-                        if getattr(self, "stop_requested", False):
-                            break
-                        if ok:
-                            self.log(f"  [1.{idx}] ✓ Заявка #{oid} ({fio}): подтверждена", "green")
-                            approved_orders_ready.append(o)
-
-                            # Переключаем флаг в study_list.xlsx
-                            if o.get("excel_item"):
-                                ex_row = o["excel_item"]["row"]
-                                ex_col = o["excel_item"].get("flag_col", 2)
-                                flag_txt = f"Подтвержден (#{oid})"
-                                ok_fl, fl_msg = self.client.update_study_child_flag(STUDY_EXCEL_FILE, ex_row, flag_txt, ex_col)
-                                if ok_fl:
-                                    self.log(f"      💾 В study_list.xlsx переключен флаг: '{flag_txt}' (строка {ex_row})", "cyan")
-                                    o["excel_item"]["flag"] = flag_txt
-                                    o["excel_item"]["is_confirmed"] = True
-                        else:
-                            self.log(f"  [1.{idx}] ✗ Заявка #{oid} ({fio}): ошибка подтверждения ({msg})", "red")
-
-                # ШАГ 2: Зачисление approve -> study
-                if approved_orders_ready and not getattr(self, "stop_requested", False):
-                    self.log(f"\n--- ШАГ 2: Зачисление {len(approved_orders_ready)} заявок на обучение (approve -> study) ---", "cyan")
-                    total_study_ok = 0
-                    total_study_err = 0
-                    for idx, o in enumerate(approved_orders_ready, 1):
-                        if getattr(self, "stop_requested", False):
-                            self.log("\n🛑 [СТОП] Полный цикл прерван пользователем!", "red")
-                            break
-                        oid = o.get("id")
-                        fio = o.get("server_fio") or f"{o.get('kid_last_name', '')} {o.get('kid_first_name', '')}".strip() or o.get("site_user_fio", "Ребенок")
-
-                        if verify_active and not o.get("is_in_excel"):
-                            self.log(f"  [2.{idx}] ⏭️ [ПРОПУСК: ЧУЖАЯ ЗАЯВКА] #{oid} ({fio}): нет в таблице study_list.xlsx", "yellow")
-                            continue
-
-                        avail_fin = o.get("available_financing_source")
-                        current_fin = str(avail_fin[0]) if (isinstance(avail_fin, list) and avail_fin) else fin_src
-                        ok, msg = self.client.study_program_order(
-                            order_id=oid,
-                            financing_source=current_fin,
-                            date_start=date_start,
-                            decree_number=decree_num,
-                            date_signing=date_signing
-                        )
-                        if getattr(self, "stop_requested", False):
-                            break
-                        if ok:
-                            total_study_ok += 1
-                            self.log(f"  [2.{idx}] ✓ Заявка #{oid} ({fio}): успешно зачислена на обучение!", "green")
-
-                            # Переключаем флаг в study_list.xlsx
-                            if o.get("excel_item"):
-                                ex_row = o["excel_item"]["row"]
-                                ex_col = o["excel_item"].get("flag_col", 2)
-                                flag_txt = f"Зачислен (приказ №{decree_num} от {date_signing})"
-                                ok_fl, fl_msg = self.client.update_study_child_flag(STUDY_EXCEL_FILE, ex_row, flag_txt, ex_col)
-                                if ok_fl:
-                                    self.log(f"      💾 В study_list.xlsx переключен флаг: '{flag_txt}' (строка {ex_row})", "cyan")
-                                    o["excel_item"]["flag"] = flag_txt
-                                    o["excel_item"]["is_enrolled"] = True
-                        else:
-                            total_study_err += 1
-                            self.log(f"  [2.{idx}] ✗ Заявка #{oid} ({fio}): ошибка ({msg})", "red")
-
-                    write_to_log_file(
-                        "=" * 80 + "\n"
-                        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ИТОГИ ПОЛНОГО ЦИКЛА (ШАГ 1: APPROVE + ШАГ 2: STUDY)\n"
-                        f"Программа: {getattr(self, 'current_study_prog_name', '-')}\n"
-                        f"Приказ №: {decree_num} от {date_signing} (начало: {date_start})\n"
-                        f"Успешно зачислено на обучение (Шаг 2): {total_study_ok}\n"
-                        f"Ошибок: {total_study_err}\n"
-                        f"Флаги в study_list.xlsx обновлены.\n"
-                        + "=" * 80 + "\n\n"
+            # ШАГ 2: Зачисление approve -> study
+            if approved_orders_ready:
+                self.log(f"\n--- ШАГ 2: Зачисление {len(approved_orders_ready)} заявок на обучение (approve -> study) ---", "cyan")
+                total_study_ok = 0
+                total_study_err = 0
+                for idx, o in enumerate(approved_orders_ready, 1):
+                    oid = o.get("id")
+                    fio = f"{o.get('kid_last_name', '')} {o.get('kid_first_name', '')}".strip() or o.get("site_user_fio", "Ребенок")
+                    avail_fin = o.get("available_financing_source")
+                    current_fin = str(avail_fin[0]) if (isinstance(avail_fin, list) and avail_fin) else fin_src
+                    ok, msg = self.client.study_program_order(
+                        order_id=oid,
+                        financing_source=current_fin,
+                        date_start=date_start,
+                        decree_number=decree_num,
+                        date_signing=date_signing
                     )
-                    self.log(f"\n[ГОТОВО] Полный цикл завершен: успешно зачислено {total_study_ok} детей на обучение!", "green")
-                    if not getattr(self, "stop_requested", False):
-                        self.root.after(0, lambda: messagebox.showinfo(
-                            "Полный цикл завершен",
-                            f"Успешно завершено!\n\n"
-                            f"✓ Зачислено на обучение: {total_study_ok}\n"
-                            f"Приказ №: {decree_num} от {date_signing}\n"
-                            f"Флаги в study_list.xlsx обновлены."
-                        ))
-                else:
-                    if not getattr(self, "stop_requested", False):
-                        self.log("\n[ГОТОВО] Нет заявок для зачисления на обучение.", "yellow")
+                    if ok:
+                        total_study_ok += 1
+                        self.log(f"  [2.{idx}] ✓ Заявка #{oid} ({fio}): успешно зачислена на обучение!", "green")
+                    else:
+                        total_study_err += 1
+                        self.log(f"  [2.{idx}] ✗ Заявка #{oid} ({fio}): ошибка ({msg})", "red")
 
-            except InterruptedError:
-                self.log("\n🛑 [СТОП] Полный цикл зачисления немедленно прерван!", "red")
-            finally:
-                def _done():
-                    if getattr(self, "stop_requested", False):
-                        self.reset_to_initial_state()
-                        return
-                    self.set_task_running(False)
-                    self.check_study_program_orders(silent=True)
-                self.root.after(0, _done)
+                self.log(f"\n[ГОТОВО] Полный цикл завершен: успешно зачислено {total_study_ok} детей на обучение!", "green")
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Полный цикл завершен",
+                    f"Успешно завершено!\n\n"
+                    f"✓ Зачислено на обучение: {total_study_ok}\n"
+                    f"Приказ №: {decree_num} от {date_signing}"
+                ))
+            else:
+                self.log("\n[ГОТОВО] Нет заявок для зачисления на обучение.", "yellow")
+
+            # Автоматически обновляем данные с сервера
+            self.check_study_program_orders(silent=True)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -4609,14 +3361,4 @@ if __name__ == "__main__":
             pass
 
     app = NavigatorApp(root)
-
-    def on_closing():
-        try:
-            write_to_log_file(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🏁 ЗАВЕРШЕНИЕ РАБОТЫ ПРОГРАММЫ (ОКНО ЗАКРЫТО)")
-            write_to_log_file("=" * 85 + "\n")
-        except Exception:
-            pass
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
